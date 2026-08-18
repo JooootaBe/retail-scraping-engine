@@ -1,0 +1,51 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# IDE
+.vscode/
+.idea/
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+.mk_capture_profile/
+
+# Logs
+*.log
+logs/
+
+# Generated data
+salida/
+output/
+outputs/
+raw/
+*.jsonl
+*.jsonl.gz
+
+# Generated results
+resultado_*.csv
+resultado_*.json
+productos_aleatorios.json
+productos_aleatorios.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+CLAUDE.md
+
+# graphify
+graphify-out/
+
+# salidas
+salidas/
