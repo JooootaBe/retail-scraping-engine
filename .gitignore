@@ -24,7 +24,7 @@ blob-report/
 logs/
 
 # Generated data
-salida/
+data/
 output/
 outputs/
 raw/
@@ -41,11 +41,5 @@ productos_aleatorios.csv
 .DS_Store
 Thumbs.db
 
-# Claude
-CLAUDE.md
-
 # graphify
 graphify-out/
-
-# salidas
-salidas/
