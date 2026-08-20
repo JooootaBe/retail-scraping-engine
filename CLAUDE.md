@@ -290,3 +290,7 @@ not add cross-branch comparison logic to this engine, at 2 branches or at 20.
   not protected by git history.
 - `graphify-out/` holds a generated knowledge graph of this repo (`graph.html`, `GRAPH_REPORT.md`) — useful
   for orientation, but the engine file itself is always the source of truth.
+
+- `docs/decisiones_1.1.0.md` — closed inventory of what ships in 1.1.0:
+  verified bi-price mechanism, 25 new columns, known bugs, acceptance
+  criterion and scope. Consult before proposing changes.

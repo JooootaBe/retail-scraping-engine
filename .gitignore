@@ -9,6 +9,11 @@ venv/
 __pycache__/
 *.py[cod]
 
+# Packaging (pip install -e .)
+*.egg-info/
+build/
+dist/
+
 # IDE
 .vscode/
 .idea/
@@ -25,17 +30,6 @@ logs/
 
 # Generated data
 data/
-output/
-outputs/
-raw/
-*.jsonl
-*.jsonl.gz
-
-# Generated results
-resultado_*.csv
-resultado_*.json
-productos_aleatorios.json
-productos_aleatorios.csv
 
 # OS
 .DS_Store
