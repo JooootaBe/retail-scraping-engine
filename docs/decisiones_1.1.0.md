@@ -34,10 +34,17 @@ Verificado al centavo en 5 SKUs, remedidos contra checkout:
 - `priceDefinition.reason = "priceTable"` aparece **siempre**, incluso en qty=1 sin descuento.
   **No es detector.** El detector de aplicación es `priceTags`: vacío en qty=1, con
   `discount@price-table-bipreciomakro-…` desde el umbral.
-- Un solo régimen VTEX cubre todo el bi-precio de Makro:
-  `rateAndBenefitsIdentifiers[0].id = ca697c7e-dcd3-40bb-8dd0-c21a1163ea22`
-  ("Bi Precio Vigente Regular MAKRO"). Identifica el régimen, no agrupa productos. Si cambia,
-  Makro reconfiguró su esquema mayorista.
+- El régimen VTEX se lee del **teaser**, no de `rateAndBenefitsIdentifiers`: ese array está
+  **vacío en qty=1** y el motor mide a qty=1, así que como fuente es inutilizable.
+  `promo_regime_id` = `teaser.id`; `promo_regime_name` = `teaser.name`. El catálogo trae el
+  teaser **sin `id`** (solo nombre) y `simulation` lo trae con `id`: la medición es la fuente
+  preferida, el catálogo el respaldo.
+- Un solo régimen cubre todo el bi-precio de Makro: `225a92ff-a721-4f76-8856-2cba133c12d8`,
+  de nombre **`MAKRO-Bi-Precio|Vigente Oculto`** — las 24 filas con bi-precio de `golden_v5.csv`
+  lo llevan. Identifica el régimen, no agrupa productos. Si cambia, Makro reconfiguró su esquema
+  mayorista. *(El nombre "Bi Precio Vigente Regular MAKRO" que circulaba antes no existe: era una
+  fusión de dos nombres distintos, el de arriba y `Precio Vigente Regular MAKRO`, que es otro
+  régimen — 6 filas del golden, sin bi-precio.)*
 - `PaymentMethodId = 4` es **informativo, no restrictivo**: el descuento se aplica sin enviar
   método de pago. Además, `4` no corresponde a ninguno de los sistemas disponibles
   (206, 208, 209, 210).
@@ -97,9 +104,18 @@ El Bife Ancho lo confirma: `price` > `list_price`, imposible en un precio tachad
 - El peso es un **promedio declarado** ("0.2 kg aprox."), no el peso real de la pieza. Por eso
   `price` en peso variable es estimado y `list_price` es contractual.
 
+**El golden v5 no aplica esta regla, y no se regenera.** La corrección se decidió *después* de
+que la sonda v5 corriera: `golden_v5.csv` guarda `6.1500` para el Maracuyá — la división que este
+apartado señala como equivocada — y lo mismo en las 8/8 filas de peso variable. El golden queda
+como está; `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` se **excluyen** del
+criterio de aceptación (§10). La regla es la de arriba, no la del golden.
+
 ---
 
-## 5. Columnas nuevas (25)
+## 5. Columnas nuevas (22)
+
+9 + 4 + 4 + 5. Con las 56 del motor: 56 + 22 = **78**, que es exactamente el header de
+`golden_v5.csv`.
 
 ### Bi-precio (9)
 
@@ -119,18 +135,25 @@ precio_mayorista_verificado    enum     SI (medido a qty≥umbral) | NO (reconst
 
 ```
 SIN_BIPRECIO    sin umbral y sin descuento
-COMPLETO        umbral + descuento + precio verificado
+COMPLETO        umbral + descuento + precio unitario verificado (price_status = VERIFIED)
 SIN_DESCUENTO   umbral declarado, teaser ausente → mayorista DESCONOCIDO
 SIN_UMBRAL      descuento sin umbral
 SIN_MEDICION    descubierto, la simulation falló
 INCONSISTENTE   mayorista ≤ 0, mayor que unitario, o no da centavo exacto
 ```
 
+«Precio verificado» en `COMPLETO` es el **unitario**: `price_status = VERIFIED`. **No** es
+`precio_mayorista_verificado = SI`, que mide otro eje — si el mayorista se midió a qty≥umbral o
+se reconstruyó con la fórmula de §1. Los dos ejes son independientes: un `COMPLETO` con
+`precio_mayorista_verificado = NO` es normal, y así están 21 de las 24 filas `COMPLETO` del
+golden. Leer `COMPLETO` como si exigiera medición del mayorista produciría 3 filas `COMPLETO`
+donde el baseline espera 24.
+
 ### Régimen promocional (4)
 
 ```
-promo_regime_id       rateAndBenefitsIdentifiers[0].id
-promo_regime_name     ej. "Bi Precio Vigente Regular MAKRO"
+promo_regime_id       teaser.id — NO rateAndBenefitsIdentifiers (vacío en qty=1, §1)
+promo_regime_name     teaser.name — ej. "MAKRO-Bi-Precio|Vigente Oculto"
 payment_method_id     se registra, no se interpreta
 price_valid_until     3000-01-02 es el centinela de "sin vencimiento".
                       Una fecha real sería vencimiento de campaña en la fuente
@@ -169,16 +192,13 @@ Regla de dos ramas:
 - `measurement_unit == 'un'` → parsear del nombre. `presentacion_origen = NOMBRE`. **Heurística.**
 - Si no se puede → `DESCONOCIDO` y las derivadas vacías.
 
-### Marca y confianza (3)
+### Marca y confianza — **no entra en 1.1.0, pasa a 1.1.1**
 
-```
-presentacion_confianza   ALTA | MEDIA | BAJA — distingue un "473ml" limpio de un
-                         "600ml Paquete 6un" reconstruido
-brand_dq                 marca cargada mal en origen (ej. frutas Makro con brand = PLAZA VEA)
-es_marca_propia          derivado: ARO, MAKRO, o URL con sufijo -mk
-```
+`presentacion_confianza`, `brand_dq` y `es_marca_propia` se propusieron sin ninguna medición
+detrás y no están en el golden. Fuera del conteo de 22 y fuera del esquema de 1.1.0 (§12).
 
-La sucursal **nunca** va en `brand`. `brand` es quién fabrica; el nodo ya está en seis columnas.
+Lo que sí rige desde ya: la sucursal **nunca** va en `brand`. `brand` es quién fabrica; el nodo
+ya está en seis columnas.
 
 ---
 
@@ -231,9 +251,18 @@ SKU por nodo.
 Nunca un CSV por sucursal. Nunca columnas tipo `precio_359` / `precio_360`: cada nodo nuevo
 cambiaría el esquema.
 
-Justificación medida: de 56 columnas, solo 11 difieren entre 359 y 360, y son todas de
-identidad del nodo. El formato ancho para reportes se proyecta con un pivot en la capa de
-consolidación, no lo produce el motor.
+Justificación medida sobre `golden_v5.csv` (20 SKUs × 2 nodos): de las 56 columnas del motor,
+**24 difieren** entre 359 y 360 en al menos un SKU. Once son de identidad del nodo (`branch`,
+`courier_id`, `courier_name`, `delivery_channel`, `dock_id`, `node_id`, `node_resolved`,
+`polygon_name`, `postal_sent`, `seller_chain`, `warehouse_id`); las otras **trece no lo son**:
+`availability`, `error_class`, `fulfillment_confirmed`, `fulfillment_type`, `logistics_status`,
+`price_status`, `shipping_cost`, `shipping_estimate`, `sla_count`, `sla_name`, `sla_status`,
+`stock_signal`, `timestamp`. *(El "solo 11" anterior se midió sobre los CSV del smoke test —
+10 SKUs — no sobre el golden, y coincidía exacto con el subconjunto de identidad.)*
+
+Cuantas más columnas divergen por nodo, más caro sale el formato ancho: 24 lo refuerzan, no lo
+debilitan. El ancho para reportes se proyecta con un pivot en la capa de consolidación, no lo
+produce el motor.
 
 ---
 
@@ -248,15 +277,31 @@ consolidación, no lo produce el motor.
 | Sondas v1/v4: `MOTOR_PY` apunta a `mk_scraping_engine_0.1.0.py` | ruta al colector actual |
 | Sondas v2/v3: `V1_PY` busca `v1.py`, el archivo tiene otro nombre | renombrar sondas con ordinal: `01_…` … `05_…` |
 | `pyproject.toml` vacío | metadata + `where = ["src"]` + `pip install -e .` |
+| `--reiniciar` borra los CSVs para "reiniciar la serie": con una carpeta inmutable por corrida (§7) no hay archivo acumulado que borrar, y el flag apuntaría a historia ya cerrada | definir semántica nueva y explícita (¿vaciar `data/<colector>/` entero?, ¿solo `runs.jsonl` + `last_run.json`?) o **eliminar el flag**. Lo que no puede quedar es el comportamiento viejo con el layout nuevo |
 
 ---
 
 ## 10. Criterio de aceptación
 
 Correr el motor 1.1.0 sobre los **mismos 20 SKUs y 2 nodos** de la sonda v5 y hacer `diff`
-contra `tests/fixtures/makro_plazavea/golden_v5.csv`.
+contra `tests/fixtures/makro_plazavea/golden_v5.csv` (40 filas, 78 columnas: las 56 del motor
+más las 22 de §5).
 
-Debe reproducir las 40 filas **columna por columna**. Si no, no está listo.
+Debe reproducir las 40 filas columna por columna, **con estas exclusiones explícitas**. Sin
+ellas el criterio es insatisfacible por construcción:
+
+- **Volátiles** — cambian en cada corrida y nunca pueden coincidir: `run_id` (el golden trae
+  `v5_20260820_000016` en las 40 filas), `timestamp`, `fecha`, y `schema_version` (§6.7 lo sube
+  a `"4"`; el golden nació con `"3"`).
+- **Cambiadas por diseño** — el golden es anterior a la decisión y no se regenera:
+  `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` (§4: se leen de `list_price`, el
+  golden los dividió), `discount_pct` en las filas de peso variable (§4: va vacío) y
+  `fulfillment_type` donde 1.1.0 reclasifica `desconocido` → `operador_externo` (§9).
+
+El resto debe coincidir **exacto**, valor por valor. Si no, no está listo.
+
+Una diferencia fuera de esa lista es un fallo, no un ajuste del criterio: el golden es la
+evidencia de qué medía el motor antes de estos cambios y no se reemplaza para acomodar al código.
 
 ---
 
@@ -283,6 +328,8 @@ No entra en 1.1.0, aunque parezca cercano:
 - Flag `--categorias` y descubrimiento del árbol de categorías
 - Parquet y PostgreSQL
 - Colector `makro_pe`
+- `presentacion_confianza`, `brand_dq` y `es_marca_propia` — propuestas sin medición detrás;
+  quedan para 1.1.1 (§5)
 - Tests de golden file automatizados
 - Abstracciones multi-retailer
 

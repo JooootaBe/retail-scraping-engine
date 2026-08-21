@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is not a generic scraper. It is the data-collection engine for a **price intelligence practice**:
 every design decision exists so that a pricing analyst can trust a row's branch attribution enough to
 build a strategy on top of it. The engine currently tracks two Makro Perú branches (359 Santa Anita,
-360 Surco), and that is deliberate — **Nivel 1: Correctness** comes before **Nivel 2: Coverage**
-(`README.md` §2 and §6; `historia.md` tells the long version of how that principle was learned, through
-two failed rewrites). Prove branch resolution is airtight on a small, well-understood set of nodes
+360 Surco), and that is deliberate — **Nivel 1: Correctness** comes before **Nivel 2: Coverage**.
+That principle was learned through two failed rewrites of this engine; this file is now the only place
+that record survives. Prove branch resolution is airtight on a small, well-understood set of nodes
 before adding more.
 
 Every change should be judged against this question: **does it make branch attribution more correct, or
@@ -21,38 +21,37 @@ branches").
 
 A single-purpose extractor: it pulls per-branch (sucursal) retail prices from Makro Perú's VTEX-powered
 storefront (`www.makro.plazavea.com.pe`) using Playwright's async `APIRequestContext` to call VTEX's
-public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). There is no `src/`, no
-test suite, no packaging — the whole engine is one file.
+public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). The extraction logic is
+still **one file**: a single module inside an installable package, with no automated test suite around it.
 
 ```
-engines/mk_scraping_engine_0.1.0.py   the engine (~3,780 lines, VERSION 2026.08.13-13, SCHEMA_VERSION 3)
-main.py                               ASCII launcher banner only — see caveat below
-requirements.txt                      playwright==1.62.0 (Python 3.12)
-README.md                             architectural spec of the engine
-historia.md                           project narrative: v01 → v13 → 0.1.0, and why each version exists
-salida/makro/                         all output (gitignored)
+src/retail_engine/collectors/makro_plazavea.py   the engine (3,779 lines, VERSION 2026.08.13-13, SCHEMA_VERSION 3)
+pyproject.toml                                   package `retail-engine` 1.0.0, Python >=3.12, playwright>=1.62.0
+docs/decisiones_1.1.0.md                         closed inventory of what ships in 1.1.0
+CHANGELOG.md                                     released and unreleased changes
+tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
+tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
+data/                                            generated output (gitignored, `.gitignore:32`)
 ```
 
 The project exists to build a time series of prices per SKU per branch so a pricing analyst can compare
 branches later in SQL/pandas. **The extractor itself never compares branches and never drops rows** —
 see "Guiding principles" before changing extraction logic.
 
-**`main.py` caveat:** it defines `draw_banner()` but never calls it, and it imports `wcwidth`, which is
-*not* in `requirements.txt`. It is not an entry point to the engine today. Don't assume `python3 main.py`
-runs anything.
-
 ## Running it
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -e .
 playwright install chromium          # the default --canal is "chrome"; falls back to managed Chromium
 
-python3 engines/mk_scraping_engine_0.1.0.py --version                        # version + changelog, no network
-python3 engines/mk_scraping_engine_0.1.0.py --catalogo 300 --por-categoria 3 --muestra 100   # normal test run
-python3 engines/mk_scraping_engine_0.1.0.py --tope 60000                     # full catalog (slow, deliberate)
-python3 engines/mk_scraping_engine_0.1.0.py --modo orderform                 # 3-request flow instead of simulation
-python3 engines/mk_scraping_engine_0.1.0.py --reiniciar                      # delete CSVs, restart the series
-python3 engines/mk_scraping_engine_0.1.0.py --salida /otra/ruta              # write elsewhere
+MK=src/retail_engine/collectors/makro_plazavea.py
+
+python3 $MK --version                                        # version + changelog, no network
+python3 $MK --catalogo 300 --por-categoria 3 --muestra 100   # normal test run
+python3 $MK --tope 60000                                     # full catalog (slow, deliberate)
+python3 $MK --modo orderform                                 # 3-request flow instead of simulation
+python3 $MK --reiniciar                                      # delete CSVs, restart the series
+python3 $MK --salida /otra/ruta                              # write elsewhere
 ```
 
 Flags that matter: `--catalogo N` (stop discovery at N SKUs), `--muestra N` (how many discovered SKUs get
@@ -63,10 +62,11 @@ cap per run; 0 = auto), `--intervalo` (seconds between requests, default 1.5), `
 retries, default 3), `--auditoria PCT` (% of measurements cross-checked simulation vs orderForm, default
 5, 0 disables), `--sin-evidencia` (skip archiving raw JSON), `--headed` / `--canal`.
 
-**There is no lint/test/build tooling in this repo.** Verify a change by running the engine small
-(`--catalogo 60 --por-categoria 2 --muestra 10 --auditoria 0`), then reading the console output, the
-CSVs, and `salida/makro/ultima_corrida.json`. Check the process exit code — it is meaningful (see
-"Budget exhaustion is a global failure").
+**There is no lint/test/build tooling wired up in this repo** — `tests/` holds probes and a fixture, not a
+runner. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10
+--auditoria 0`), then reading the console output, the CSVs, and `ultima_corrida.json` under the output
+directory (today `src/retail_engine/collectors/salida/makro/`, a known bug — see the note under "Output
+files"). Check the process exit code — it is meaningful (see "Budget exhaustion is a global failure").
 
 ## Versioning convention — read before editing
 
@@ -76,15 +76,19 @@ from a browser download) was run for hours and the dataset came out silently tag
 taxonomy.
 
 Three defenses exist and must stay intact when bumping versions:
-1. The version lives in the **filename** so two versions can't collide on disk.
+1. The version lives in the **filename** so two versions can't collide on disk. *(No longer literally true
+   since the move to `src/`: the collector has one stable path, `makro_plazavea.py`, so defenses 2 and 3
+   carry the whole load and must not be weakened.)*
 2. `VERSION` and the file's own name are printed in the run header (`archivo_script`).
-3. Both are written into `salida/makro/ultima_corrida.json`, so every dataset traces back to the exact script.
+3. Both are written into the run manifest (`ultima_corrida.json`), so every dataset traces back to the
+   exact script.
 
-When bumping: copy the file to a new name, update `VERSION` (`YYYY.MM.DD-NN`), and prepend a changelog
+When bumping: update `VERSION` (`YYYY.MM.DD-NN`) and prepend a changelog
 entry to `CAMBIOS` describing what changed. Bump `SCHEMA_VERSION` only if you add/remove/rename a `Fila`
 field — it's written into every row so a CSV from six months ago can say what rules it was born under
 (v13 deliberately kept it at `"3"` because no field changed, so v12 and v13 CSVs append together).
-Do not delete older engine files — they document provenance for past CSV rows.
+If an older engine file is ever kept next to the current collector, do not delete it — it documents
+provenance for past CSV rows. (The tree holds only `makro_plazavea.py` today.)
 
 ## Guiding principle: identify the branch, don't assume it
 
@@ -99,7 +103,9 @@ mislabeling data. `polygonName` is excluded from the match (`Nodo.firma_core()`)
 
 `identificar_nodo` loops over every entry in `NODOS` and returns whichever signature matches — a *search*,
 not a lookup keyed by what you sent. That's what makes 2 → 20 branches free: the loop, the CSV-per-branch
-output, and the manifest's per-branch tallies all iterate `NODOS`. To add a branch: add one entry (address,
+output, and the manifest's per-branch tallies all iterate `NODOS`. *(The CSV-per-branch output is
+**superseded by 1.1.0** — one long-format CSV keyed `(run_id, node_id, sku_id)`, `docs/decisiones_1.1.0.md`
+§8. The search loop itself is unchanged.)* To add a branch: add one entry (address,
 coordinates, the four logistics identifiers, `seller_chain`, `archivo`). Nothing else changes — but read
 "Scaling to 20+ branches" before trusting it.
 
@@ -191,7 +197,8 @@ Three separate parser bugs (`all_headers` vs `headers`, a destructive fallback, 
 discarded valid nodes) each cost re-scraped history. Two defenses now exist:
 
 - **Raw evidence** (`guardar_evidencia`) — every response is archived, compressed, to
-  `salida/makro/raw/<date>/<run_id>.jsonl.gz` (headers/cookies excluded on purpose — session tokens never
+  `raw/<date>/<run_id>.jsonl.gz` under the output directory (in 1.1.0, `raw.jsonl.gz` inside the run's own
+  folder — `docs/decisiones_1.1.0.md` §7) — (headers/cookies excluded on purpose — session tokens never
   touch disk). A parser fix can be replayed against the archive with zero new requests.
 - **Sampled reconciliation** (`--auditoria`, default 5%) — that share of measurements is fetched *both* ways
   and diffed (`reconciliar`) on price, availability, warehouse and seller chain. `simulation` is trusted by
@@ -207,11 +214,13 @@ dangerous: an old header would silently receive wider rows, misaligning every do
 differ, renames the old file with a cutoff timestamp instead of appending under a mismatched header — nothing
 is lost, both eras stay independently readable. Don't hand-edit a CSV header to make the mismatch go away.
 
-## Architecture (`engines/mk_scraping_engine_0.1.0.py`, single file, top to bottom)
+## Architecture (`src/retail_engine/collectors/makro_plazavea.py`, single file, top to bottom)
 
 1. **Version block + `CAMBIOS`** — `VERSION`, `SCHEMA_VERSION`, and the per-version changelog described above.
 2. **Constants** — `MOTOR = "makro"` names the output subfolder (`salida/makro/`) so future engines
-   (Tottus, Sodimac) can't collide; `RETAILER` travels *inside* every row.
+   (Tottus, Sodimac) can't collide; `RETAILER` travels *inside* every row. *(**Superseded by 1.1.0**: the
+   collector is named by source — `makro_plazavea` — and output moves to `data/<colector>/run_<id>/`,
+   `docs/decisiones_1.1.0.md` §7 and §9. The reason for the split — one namespace per engine — stands.)*
 3. **`Nodo` / `NODOS`** — branch signature catalog; `firma_core()` and `direccion()`.
 4. **`Producto` / `Fila`** — `Producto` is a catalog entry; `Fila` is one measurement (SKU × branch ×
    moment) and its fields are the CSV schema. Every row carries `run_id`, `schema_version`, `retailer`, and
@@ -241,20 +250,24 @@ is lost, both eras stay independently readable. Don't hand-edit a CSV header to 
     `cannotBeDelivered`/`withoutStock`, and never overwrites a simulation price with an empty orderform result.
 11. **Output** (`archivar_si_cambio_el_esquema`, `apendear_csv`, `evaluar_corrida`, `escribir_manifiesto`) —
     schema guard first; CSVs are **appended**, never overwritten (that's the time-series property);
-    `--reiniciar` is the explicit opt-in to wipe. The manifest records script/schema version, run ID,
+    `--reiniciar` is the explicit opt-in to wipe. *(Append-per-branch is **superseded by 1.1.0**: one folder
+    per run, one long CSV inside it — `docs/decisiones_1.1.0.md` §7 and §8. The time-series property moves
+    from "append to a file" to "one immutable folder per run"; never overwrite a past run's folder.)* The
+    manifest records script/schema version, run ID,
     requests per phase, per-branch tallies, `descubrimiento` / `medicion` / `stock_cadena` completeness
     blocks, and `resumen.corrida_completa` + `motivos_fallo_global`.
 12. **`main()`** — CLI parsing, browser lifecycle, per-run global state reset (`MEDICION`,
     `STOCK_CADENA_ESTADO`, `ALARMA_FIRMA_DISPARADA` — they're module globals so `escribir_manifiesto` can
     read them; keep them cleared per run so a second call in one process starts clean), a warning if pre-v11
-    CSVs are still sitting in the old flat `salida/` (it never moves them), auto request-cap sizing, and the
+    CSVs are still sitting in the old flat output root (it never moves them), auto request-cap sizing, and the
     final `evaluar_corrida` verdict + exit code.
 
 ## Scaling to 20+ branches
 
 More branches, same architecture — most machinery already scales because it iterates `NODOS`:
 
-- **Free**: `identificar_nodo`'s search loop, the measurement loop, one CSV per branch (`nodo.archivo`), the
+- **Free**: `identificar_nodo`'s search loop, the measurement loop, one CSV per branch (`nodo.archivo`) —
+  in 1.1.0, one more `node_id` value inside the single long CSV (`docs/decisiones_1.1.0.md` §8) — the
   manifest's per-branch breakdown, and request-cap auto-sizing.
 - **Grows linearly, needs planning**: requests per run (SKUs × branches, ~×4 worst case) and wall-clock time
   (requests are strictly sequential at `--intervalo`, by design — "respeto al servidor" in the module
@@ -265,11 +278,17 @@ More branches, same architecture — most machinery already scales because it it
   looks "covered" in row counts while contributing zero verified prices. The v13 per-node alarm now warns
   during the run, but still: **before trusting a new branch, run a small `--muestra` against just that node and
   confirm rows come back `MATCH` / `MATCH_SELLER_RAIZ`.**
-- **Out of scope here**: multi-retailer adapters and a retailer-agnostic domain model (README §6, Nivel 3+).
-  Don't start building those abstractions speculatively — the `MOTOR`/`salida/<motor>/` split is the only
-  concession the engine makes to that future.
+- **Out of scope here**: multi-retailer adapters and a retailer-agnostic domain model (Nivel 3+ of the
+  correctness-before-coverage ladder). Don't start building those abstractions speculatively — the
+  one-namespace-per-collector split is the only concession the engine makes to that future.
 
-## Output files (`salida/makro/`)
+## Output files
+
+> **SUPERSEDED by 1.1.0 — this section describes real 1.0.0 behavior, which 1.1.0 reverses.**
+> Layout: `docs/decisiones_1.1.0.md` §7 (`data/<colector>/run_<run_id>/`, fixed names inside).
+> CSV shape: §8 (one long-format file, never one per branch). Note also that 1.0.0's output root
+> resolves *inside the package* — `src/retail_engine/collectors/salida/makro/`, not the repo root —
+> which §9 lists as a bug to fix. The text below stays because its reasons still bind.
 
 - `makro_359_santa_anita.csv`, `makro_360_surco.csv`, ... one per `Nodo.archivo` — one row per (SKU, branch,
   run); same schema; append-only. A new `NODOS` entry gets its own file automatically.
@@ -283,14 +302,14 @@ not add cross-branch comparison logic to this engine, at 2 branches or at 20.
 
 ## Notes for future sessions
 
-- `README.md` (spec) and `historia.md` (narrative) are the authoritative context documents in-repo. Older
-  guidance referenced an `arquitectura_motor_price_intelligence_v8.md` roadmap; that file is **not** in this
-  repo — don't cite section numbers from it.
-- `CLAUDE.md`, `salida/`, `.env`, and generated CSV/JSONL artifacts are gitignored, so edits to this file are
-  not protected by git history.
+- **This file and `docs/decisiones_1.1.0.md` are the only authoritative context documents in-repo.** No
+  other narrative or roadmap document exists — don't cite section numbers from one.
+- `CLAUDE.md` is **tracked by git**: every edit lands in the history and in a PR diff. Treat it as source,
+  not as scratch. `.gitignore` covers `.env`, `data/`, `graphify-out/`, `.vscode/` and build artifacts.
 - `graphify-out/` holds a generated knowledge graph of this repo (`graph.html`, `GRAPH_REPORT.md`) — useful
   for orientation, but the engine file itself is always the source of truth.
-
-- `docs/decisiones_1.1.0.md` — closed inventory of what ships in 1.1.0:
-  verified bi-price mechanism, 25 new columns, known bugs, acceptance
-  criterion and scope. Consult before proposing changes.
+- `docs/decisiones_1.1.0.md` — closed inventory of what ships in 1.1.0: verified bi-price mechanism, the new
+  columns, known bugs, acceptance criterion and scope. It owns those numbers and definitions; don't restate
+  them here, where the two copies would drift apart. Consult it before proposing changes.
+- `docs/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
+  it before re-adding anything this file used to say.
