@@ -139,6 +139,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.21-14"
+VERSION = "2026.08.21-15"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -167,13 +168,64 @@ VERSION = "2026.08.21-14"
 # de v12 y uno de v13 se apendean sin disparar `archivar_si_cambio_el_esquema`.
 #
 # v14 (bloque A de 1.1.0) TAMPOCO toca `Fila`: cambia dónde se escribe, cómo
-# se selecciona y dos reglas de clasificación, ninguna columna. Sigue en "3"
-# a propósito — el "4" pertenece al bloque B, que agrega las 22 columnas del
-# precio mayorista (decisiones_1.1.0 §5). Subirlo acá haría que un CSV de
-# v14 dijera que tiene columnas que no tiene.
-SCHEMA_VERSION = "3"
+# se selecciona y dos reglas de clasificación, ninguna columna. Se quedó en
+# "3" a propósito, dejando el "4" para el bloque B.
+#
+# v15 (bloque B) SÍ agrega 22 campos a `Fila` — 56 -> 78 columnas — así que
+# SCHEMA_VERSION sube a "4" (§6.7). Un CSV de v14 y uno de v15 NO son la
+# misma tabla, y con una carpeta inmutable por corrida cada uno queda
+# legible por separado; la capa de consolidación usa esta columna para
+# decidir qué puede unir con qué.
+SCHEMA_VERSION = "4"
 
 CAMBIOS = [
+    "15  BLOQUE B de 1.1.0 (decisiones_1.1.0.md §1/§5/§6): las 22 columnas"
+    " del precio mayorista. SCHEMA_VERSION sube 3 -> 4 — 56 columnas pasan a"
+    " 78, el mismo header que golden_v5.csv ·"
+    " (1) BI-PRECIO (9 columnas): precio_mayorista = price − descuento, un"
+    " solo escalón. El UMBRAL (CantidadBiPrecioMK) solo existe en el"
+    " catálogo y el DESCUENTO viene en catálogo y en simulation, así que"
+    " Producto ahora ARRASTRA lo que solo el catálogo sabe (umbral bi/tri,"
+    " descuento, category_id, teaser de respaldo) desde el descubrimiento"
+    " hasta la medición: unir por sku_id sin releer el catálogo ni guardar"
+    " un archivo intermedio, que es lo que v11 sacó del motor ·"
+    " (2) CantidadTriPrecioMK se REGISTRA y NUNCA se aplica: está declarado"
+    " y se midió que checkout no lo honra ·"
+    " (3) el descuento se busca POR NOMBRE de parámetro a cualquier"
+    " profundidad (PromotionalPriceTableItemsDiscount), nunca por índice de"
+    " array — el orden lo decide VTEX y el día que agregue un parámetro"
+    " adelante se leería el ID del producto como monto ·"
+    " (4) RÉGIMEN (4 columnas): promo_regime_id sale del TEASER, no de"
+    " rateAndBenefitsIdentifiers, que está vacío en qty=1 y el motor mide a"
+    " qty=1 siempre. El catálogo trae el teaser sin id y simulation con id:"
+    " medición preferida, catálogo respaldo ·"
+    " (5) IDENTIDAD (4 columnas): ean_type con dígito verificador GS1 y"
+    " prefijo 20-29 -> INTERNO_RESTRINGIDO (la mitad del catálogo no cruza"
+    " contra otro retailer y sin esta columna eso son falsos negativos"
+    " silenciosos) · category_id de la ruta más larga de categoriesIds,"
+    " estable donde el texto no lo es · surtido_makro desde sellerChain ·"
+    " (6) PRESENTACIÓN (5 columnas): regla de dos ramas — measurement_unit"
+    " != 'un' usa el unit_multiplier de VTEX y es AUTORITATIVO; == 'un'"
+    " parsea el nombre y es HEURÍSTICA, etiquetada como tal en"
+    " presentacion_origen; si no se puede, DESCONOCIDO y derivadas vacías,"
+    " nunca un 1 inventado. Incluye la corrección de multipack tras la"
+    " medida (600ml Paquete 6un = 3.6 L) con el corte de relleno sin"
+    " dígitos, para que 'Deli 1Lt D2 Sf Pp 25un' no ate el litro con las 25"
+    " unidades ·"
+    " (7) todo cálculo monetario en Decimal o centavos enteros (§6.1):"
+    " ningún float toca un precio, y un descuento que no cae exacto en el"
+    " centavo sale INCONSISTENTE en vez de redondeado en silencio ·"
+    " (8) vacío != cero (§6.2): sin biprecio_status COMPLETO, bi_umbral y"
+    " precio_mayorista* van vacíos — un mayorista igual al unitario es una"
+    " mentira que se filtra sola en una hoja de cálculo ·"
+    " (9) precio_mayorista_verificado sale siempre NO: el motor mide a qty=1"
+    " y RECONSTRUYE el mayorista. El SI solo puede ponerlo algo que haya"
+    " medido a qty>=umbral, y eso hoy no existe en el motor (la sonda v5 sí"
+    " lo tiene, y por eso el golden trae 3 filas en SI) ·"
+    " (10) las reglas viven en funciones PURAS (calcular_mayorista,"
+    " clasificar_ean, resolver_presentacion, leer_regimen, leer_descuento) y"
+    " enriquecer_fila() es solo pegamento: se prueban sin levantar"
+    " Playwright y se mudan solas el día que el archivo se parta en módulos",
     "14  BLOQUE A de 1.1.0 (decisiones_1.1.0.md §4/§7/§8/§8.1/§9): salida,"
     " flags y bugs. NO toca el esquema — SCHEMA_VERSION sigue en 3 y ninguna"
     " columna se agrega ni se renombra; las 22 del precio mayorista son el"
@@ -540,6 +592,28 @@ class Producto:
     url: str = ""
     stock_catalog: str = ""
 
+    # --- LO QUE SOLO SABE EL CATÁLOGO (decisiones_1.1.0 §1) --------------
+    #
+    # El UMBRAL del bi-precio no existe en checkout: solo viene como
+    # `specification` del producto. El DESCUENTO viene en las dos fuentes,
+    # pero el catálogo trae el teaser SIN `id`, así que como respaldo sirve
+    # para el nombre y no para el identificador.
+    #
+    # Viajan en `Producto` porque es el único objeto que cruza desde el
+    # descubrimiento hasta la medición: sin esto habría que releer el
+    # catálogo por SKU al medir, o —peor— guardar un archivo intermedio, que
+    # es exactamente lo que v11 sacó del motor.
+    #
+    # Todo `str`: vacío = el catálogo no lo dijo. La conversión a número vive
+    # en las funciones puras, no acá.
+    bi_umbral: str = ""
+    tri_umbral: str = ""
+    category_id: str = ""
+    descuento_catalogo: str = ""
+    promo_regime_id_catalogo: str = ""
+    promo_regime_name_catalogo: str = ""
+    payment_method_id_catalogo: str = ""
+
 
 @dataclass
 class Fila:
@@ -664,6 +738,57 @@ class Fila:
     # Resultado del contraste simulation vs orderForm (solo filas auditadas).
     recon_status: str = ""
 
+    # =====================================================================
+    # 1.1.0 — LAS 22 COLUMNAS NUEVAS (decisiones_1.1.0 §5)
+    # =====================================================================
+    #
+    # El ORDEN importa: `COLUMNAS` se deriva de este dataclass, así que este
+    # es el orden del CSV. Es el mismo de `golden_v5.csv`, que es el
+    # baseline del criterio de aceptación (§10) — reordenarlas rompería el
+    # diff sin cambiar un solo dato.
+
+    # --- BI-PRECIO (9) ---------------------------------------------------
+    # Regla dura §6.2: si `biprecio_status != COMPLETO`, `bi_umbral` y
+    # `precio_mayorista*` van VACÍOS. Nunca cero, nunca el unitario repetido.
+    bi_umbral: str = ""
+    # Se registra SIEMPRE que exista y NUNCA se aplica: está declarado en el
+    # catálogo y se midió que checkout no lo honra (§1).
+    tri_umbral_declarado: str = ""
+    # El descuento es un hecho de VTEX: se publica aunque el mayorista no se
+    # pueda armar. Es lo que hace diagnosticable un SIN_UMBRAL (§6.4).
+    descuento_monto: str = ""
+    descuento_monto_cents: str = ""
+    precio_mayorista: str = ""
+    precio_mayorista_cents: str = ""
+    descuento_mayorista_pct: str = ""
+    biprecio_status: str = ""
+    # OTRO EJE que `biprecio_status`: dice si el mayorista se MIDIÓ a
+    # qty≥umbral o se reconstruyó con la fórmula de §1. Un COMPLETO con
+    # `NO` es lo normal, no una carencia.
+    precio_mayorista_verificado: str = ""
+
+    # --- RÉGIMEN PROMOCIONAL (4) -----------------------------------------
+    promo_regime_id: str = ""
+    promo_regime_name: str = ""
+    # Se registra, no se interpreta: `4` es informativo y no restringe nada.
+    payment_method_id: str = ""
+    # `3000-01-02` es el centinela de "sin vencimiento".
+    price_valid_until: str = ""
+
+    # --- IDENTIDAD Y CALIDAD (4) -----------------------------------------
+    ean_type: str = ""
+    category_id: str = ""
+    sales_channel: str = ""
+    # La ÚNICA prueba de surtido Makro de ESTA sucursal (§2).
+    surtido_makro: str = ""
+
+    # --- PRESENTACIÓN (5) ------------------------------------------------
+    unidad_base: str = ""
+    cantidad_base: str = ""
+    presentacion_origen: str = ""
+    precio_por_unidad_base: str = ""
+    precio_mayorista_por_unidad_base: str = ""
+
 
 COLUMNAS = list(Fila().__dict__.keys())
 
@@ -737,6 +862,85 @@ def es_landing_seo(nombre: str) -> bool:
         return True
 
     return limpio[0].islower()
+
+
+# ---------------------------------------------------------------------------
+# DINERO EN DECIMAL — regla dura §6.1
+# ---------------------------------------------------------------------------
+#
+# `float` solo para lectura humana. Todo cálculo monetario va en centavos
+# enteros o en `Decimal`, porque el bi-precio es una RESTA de dos números que
+# vienen del servidor y un céntimo perdido en binario es un céntimo que el
+# analista no puede explicar.
+
+CERO = Decimal("0")
+CENTAVO = Decimal("0.01")
+CUATRO = Decimal("0.0001")
+
+
+def dec(valor: Any) -> Decimal | None:
+    """
+    A `Decimal` pasando por `str`: NUNCA `Decimal(float)`.
+
+    El JSON llega con los precios ya parseados como float, y `Decimal(13.3)`
+    arrastra la basura binaria (13.300000000000000710542735760100185871124267578125).
+    `Decimal("13.3")` es lo que el servidor dijo.
+    """
+
+    if valor is None or isinstance(valor, bool) or valor == "":
+        return None
+
+    try:
+        return Decimal(str(valor).strip())
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return None
+
+
+def entero(valor: Any) -> int | None:
+    """Solo si el número es entero exacto: 2.5 unidades no es un umbral."""
+
+    numero = dec(valor)
+
+    if numero is None:
+        return None
+
+    try:
+        return int(numero) if numero == numero.to_integral_value() else None
+    except (InvalidOperation, ArithmeticError):
+        return None
+
+
+def money(valor: Decimal | None) -> str:
+    """Dos decimales, para leer. Vacío si no hay número."""
+
+    return "" if valor is None else f"{valor.quantize(CENTAVO)}"
+
+
+def money4(valor: Decimal | None) -> str:
+    """Cuatro decimales: los precios por unidad base necesitan la precisión."""
+
+    return "" if valor is None else f"{valor.quantize(CUATRO)}"
+
+
+def a_centavos(valor: Decimal | None) -> int | None:
+    """
+    Soles -> centavos enteros. `None` si NO cae exacto en el centavo.
+
+    Un descuento de 0.205 soles no existe. Si VTEX lo manda, es un dato que
+    no entiendo, y prefiero la celda vacía —con su estado al lado
+    explicándola— antes que redondear medio céntimo en silencio y que
+    aparezca multiplicado por un umbral de 24.
+    """
+
+    if valor is None:
+        return None
+
+    escalado = valor * 100
+
+    if escalado != escalado.to_integral_value():
+        return None
+
+    return int(escalado)
 
 
 def buscar_todo(objeto: Any, clave: str) -> list[Any]:
@@ -1083,6 +1287,16 @@ def parsear_producto(crudo: dict) -> Producto | None:
 
     categorias = crudo.get("categories") or []
 
+    # `categoriesIds` trae TODAS las rutas del producto; la más larga es la
+    # más específica, y es la que identifica sin depender del texto (que VTEX
+    # renombra sin avisar). Por eso `category_id` y `category` conviven: una
+    # es estable, la otra es legible.
+    rutas = [s(r) for r in (crudo.get("categoriesIds") or []) if s(r)]
+
+    regimen = leer_regimen(crudo)
+
+    descuento = leer_descuento(crudo)
+
     return Producto(
         product_id=s(crudo.get("productId")),
         sku_id=s(item.get("itemId")),
@@ -1096,7 +1310,28 @@ def parsear_producto(crudo: dict) -> Producto | None:
         seller_id=s(vendedores[0].get("sellerId")) or "1",
         url=s(crudo.get("link")),
         stock_catalog=s(oferta.get("AvailableQuantity")),
+        bi_umbral=s(especificacion(crudo, SPEC_BI)),
+        tri_umbral=s(especificacion(crudo, SPEC_TRI)),
+        category_id=max(rutas, key=len) if rutas else "",
+        descuento_catalogo="" if descuento is None else str(descuento),
+        promo_regime_id_catalogo=regimen["promo_regime_id"],
+        promo_regime_name_catalogo=regimen["promo_regime_name"],
+        payment_method_id_catalogo=regimen["payment_method_id"],
     )
+
+
+def especificacion(crudo: dict, nombre: str) -> Any:
+    """
+    Una `specification` del producto: VTEX las devuelve como lista de un solo
+    valor, y a veces como el valor pelado.
+    """
+
+    valor = crudo.get(nombre)
+
+    if isinstance(valor, list):
+        return valor[0] if valor else None
+
+    return valor
 
 
 # Diagnóstico del último descubrimiento. Se vuelca en ultima_corrida.json
@@ -2358,6 +2593,457 @@ def extraer_logistica(datos: Any, nodo: Nodo) -> dict[str, str]:
     return con_contexto(candidatos[0])
 
 
+# ===========================================================================
+# BI-PRECIO, EAN Y PRESENTACIÓN — reglas puras (decisiones_1.1.0 §1, §5)
+# ===========================================================================
+#
+# Todo lo de esta sección es función pura: entra JSON o strings, sale un
+# valor. Ninguna toca la red, ninguna toca `Fila`. Están juntas y sin
+# dependencias del resto del motor para que el día que el archivo se parta en
+# módulos se muevan solas, y para que se puedan probar sin levantar Playwright.
+#
+# El pegamento —qué función alimenta qué columna— vive en `enriquecer_fila()`,
+# abajo, y es deliberadamente delgado.
+
+# El nombre del parámetro que lleva el descuento del bi-precio, dentro del
+# teaser. Se busca POR NOMBRE, nunca por índice: ver `parametros_por_nombre`.
+PARAM_DESCUENTO = "PromotionalPriceTableItemsDiscount"
+PARAM_PAGO = "PaymentMethodId"
+
+# Specifications del catálogo. El umbral SOLO existe acá: checkout no lo
+# devuelve nunca, y por eso catálogo y medición hay que unirlos por sku_id.
+SPEC_BI = "CantidadBiPrecioMK"
+SPEC_TRI = "CantidadTriPrecioMK"
+
+
+def clave_normal(clave: Any) -> str:
+    """
+    `<Name>k__BackingField` -> `name`. `Name` -> `name`. `name` -> `name`.
+
+    VTEX serializa el MISMO dato de tres formas distintas según el endpoint
+    (catálogo viejo, catálogo nuevo, checkout). Normalizar la clave es lo que
+    permite escribir cada regla una sola vez en vez de tres.
+    """
+
+    return str(clave).replace("k__BackingField", "").strip("<> ").strip().lower()
+
+
+def parametros_por_nombre(objeto: Any, nombre: str) -> list[Any]:
+    """
+    Busca `{"Name": <nombre>, "Value": X}` a CUALQUIER profundidad.
+
+    Nunca por índice. Anclar en `Parameters[1]` funciona hasta el día que
+    VTEX agrega un parámetro adelante, y ese día se lee el ID del producto
+    como si fuera un monto de descuento — sin error, sin aviso, con el
+    precio mayorista saliendo mal en todas las filas.
+    """
+
+    encontrados: list[Any] = []
+
+    def recorrer(nodo: Any) -> None:
+        if isinstance(nodo, dict):
+            claves = {clave_normal(k): k for k in nodo.keys()}
+
+            if "name" in claves and "value" in claves:
+                if s(nodo[claves["name"]]) == nombre:
+                    encontrados.append(nodo[claves["value"]])
+
+            for valor in nodo.values():
+                recorrer(valor)
+
+        elif isinstance(nodo, list):
+            for valor in nodo:
+                recorrer(valor)
+
+    recorrer(objeto)
+
+    return encontrados
+
+
+def campo(nodo: Any, nombre: str) -> str:
+    """Un campo de un dict, tolerando las tres serializaciones de VTEX."""
+
+    if not isinstance(nodo, dict):
+        return ""
+
+    for clave in nodo:
+        if clave_normal(clave) == nombre:
+            return s(nodo[clave])
+
+    return ""
+
+
+def teasers_con_descuento(objeto: Any) -> list[dict]:
+    """
+    Los teasers que llevan un `PromotionalPriceTableItemsDiscount`.
+
+    Se recorren TODAS las listas de teasers de la respuesta (`teaser` en
+    checkout, `PromotionTeasers` / `Teasers` en catálogo) y se filtra por
+    CONTENIDO, no por dónde estaban: el régimen se identifica porque carga el
+    descuento, no porque aparezca en la posición que uno esperaba.
+    """
+
+    candidatos: list[dict] = []
+
+    for clave in ("teaser", "PromotionTeasers", "Teasers", "teasers"):
+        for bloque in buscar_todo(objeto, clave):
+            if isinstance(bloque, list):
+                candidatos.extend(t for t in bloque if isinstance(t, dict))
+            elif isinstance(bloque, dict):
+                candidatos.append(bloque)
+
+    return [t for t in candidatos if parametros_por_nombre(t, PARAM_DESCUENTO)]
+
+
+def leer_descuento(objeto: Any) -> Decimal | None:
+    """El monto de descuento por unidad, en soles. `None` si no está."""
+
+    for valor in parametros_por_nombre(objeto, PARAM_DESCUENTO):
+        numero = dec(valor)
+
+        if numero is not None:
+            return numero
+
+    return None
+
+
+def leer_regimen(objeto: Any) -> dict[str, str]:
+    """
+    Régimen promocional que gobierna el bi-precio: id, nombre, medio de pago.
+
+    NO se lee de `rateAndBenefitsIdentifiers`: ese array está VACÍO en qty=1 y
+    el motor mide a qty=1 siempre, así que como fuente principal es
+    inutilizable (§1). Se lee del teaser.
+
+    El catálogo trae el teaser SIN `id` (solo nombre) y `simulation` lo trae
+    CON `id`. Por eso la medición es la fuente preferida y el catálogo el
+    respaldo: entre las dos, la columna se llena.
+    """
+
+    salida = {"promo_regime_id": "", "promo_regime_name": "", "payment_method_id": ""}
+
+    for teaser in teasers_con_descuento(objeto):
+        salida["promo_regime_id"] = salida["promo_regime_id"] or campo(teaser, "id")
+        salida["promo_regime_name"] = salida["promo_regime_name"] or campo(teaser, "name")
+
+        pagos = parametros_por_nombre(teaser, PARAM_PAGO)
+
+        if pagos and not salida["payment_method_id"]:
+            salida["payment_method_id"] = s(pagos[0])
+
+    # Respaldo del id: cuando la cantidad alcanza el umbral, la promoción
+    # aplicada sí aparece en `rateAndBenefitsIdentifiers`. El motor mide a
+    # qty=1 y no llega ahí, pero una respuesta auditada sí puede traerlo.
+    if not salida["promo_regime_id"]:
+        for bloque in buscar_todo(objeto, "rateAndBenefitsIdentifiers"):
+            for regimen in bloque if isinstance(bloque, list) else []:
+                nombre = campo(regimen, "name")
+
+                if "PRECIO" in nombre.upper().replace(" ", ""):
+                    salida["promo_regime_id"] = campo(regimen, "id")
+                    salida["promo_regime_name"] = salida["promo_regime_name"] or nombre
+                    break
+
+    return salida
+
+
+def leer_price_valid_until(datos: Any, sku_id: str) -> str:
+    """
+    `priceValidUntil` del ítem PEDIDO, no del primero que aparezca.
+
+    `3000-01-02` es el centinela de VTEX para "sin vencimiento". Una fecha
+    real sería vencimiento de campaña en la fuente, y ahí sí querríamos
+    enterarnos antes de que el precio cambie solo.
+    """
+
+    items = datos.get("items") if isinstance(datos, dict) else None
+
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and s(item.get("id")) == sku_id:
+            return s(item.get("priceValidUntil"))
+
+    return ""
+
+
+def calcular_mayorista(
+    price_cents: int | None,
+    umbral: int | None,
+    descuento: Decimal | None,
+) -> dict[str, Any]:
+    """
+    El ÚNICO lugar donde se decide si hay precio mayorista y por qué.
+
+        precio_mayorista_cents = price_cents − descuento_monto_cents
+
+    Un solo escalón (§1). `CantidadTriPrecioMK` se registra y NO se aplica:
+    está declarado en el catálogo y se midió que checkout no lo honra.
+
+    Devuelve el estado SIEMPRE, y los números SOLO cuando el estado es
+    COMPLETO. Esa asimetría es deliberada: el estado explica la celda vacía
+    de al lado, así que nunca puede faltar (§6.2 — vacío ≠ cero; un mayorista
+    igual al unitario es una mentira que se filtra sola en una hoja de
+    cálculo).
+    """
+
+    descuento_cents = a_centavos(descuento)
+
+    if price_cents is None:
+        estado = "SIN_MEDICION"
+
+    elif umbral is None and descuento is None:
+        estado = "SIN_BIPRECIO"
+
+    elif umbral is not None and descuento is None:
+        estado = "SIN_DESCUENTO"
+
+    elif descuento is not None and umbral is None:
+        estado = "SIN_UMBRAL"
+
+    elif descuento_cents is None:
+        # El descuento no cae exacto en el centavo: no se redondea, se
+        # marca. Redondear acá sería inventar medio céntimo por unidad.
+        estado = "INCONSISTENTE"
+
+    else:
+        mayorista_cents = price_cents - descuento_cents
+
+        inconsistente = (
+            mayorista_cents <= 0
+            or mayorista_cents > price_cents
+            # Un "bi-precio" que arranca en 1 unidad no es un bi-precio.
+            or umbral < 2
+        )
+
+        estado = "INCONSISTENTE" if inconsistente else "COMPLETO"
+
+    if estado != "COMPLETO":
+        return {
+            "estado": estado,
+            "descuento": descuento,
+            "descuento_cents": descuento_cents,
+            "mayorista_cents": None,
+        }
+
+    return {
+        "estado": estado,
+        "descuento": descuento,
+        "descuento_cents": descuento_cents,
+        "mayorista_cents": price_cents - descuento_cents,
+    }
+
+
+def clasificar_ean(ean: str) -> str:
+    """
+    GS1_GLOBAL | INTERNO_RESTRINGIDO | FALTANTE | INVALIDO
+
+    Por qué importa en un motor de precios: un EAN interno (prefijo 20-29) es
+    un código que la propia tienda se inventó. Sirve dentro de Makro y NO
+    sirve para cruzar el producto contra otro retailer. Tratar los dos como
+    "el EAN" arruina cualquier match de catálogo cruzado — y medido, la mitad
+    del catálogo no cruza. Sin esta columna ese 50% produce falsos negativos
+    silenciosos: el producto "no existe en el competidor" cuando lo que pasa
+    es que se lo está buscando por un código que solo existe acá.
+
+    El dígito verificador es GS1 estándar (mod 10, pesos 3/1 desde la
+    derecha) y aplica igual a EAN-8, UPC-A, EAN-13 y GTIN-14.
+    """
+
+    limpio = (ean or "").strip()
+
+    if not limpio:
+        return "FALTANTE"
+
+    if not limpio.isdigit() or len(limpio) not in (8, 12, 13, 14):
+        return "INVALIDO"
+
+    cuerpo, verificador = limpio[:-1], int(limpio[-1])
+
+    suma = 0
+
+    for posicion, digito in enumerate(reversed(cuerpo)):
+        suma += int(digito) * (3 if posicion % 2 == 0 else 1)
+
+    if (10 - suma % 10) % 10 != verificador:
+        return "INVALIDO"
+
+    # Prefijo 20-29: rango que GS1 reserva para numeración interna del
+    # comercio. No es global aunque el dígito verificador cierre.
+    prefijo = limpio[:2] if len(limpio) >= 13 else limpio[:2].zfill(2)
+
+    if len(limpio) >= 12 and prefijo.isdigit() and 20 <= int(prefijo) <= 29:
+        return "INTERNO_RESTRINGIDO"
+
+    return "GS1_GLOBAL"
+
+
+# --- PRESENTACIÓN: regla de dos ramas (§5) ---------------------------------
+
+# Factor a la unidad base canónica (kg o l).
+UNIDADES: dict[str, tuple[str, Decimal]] = {
+    "kg": ("kg", Decimal("1")),
+    "kgs": ("kg", Decimal("1")),
+    "kilo": ("kg", Decimal("1")),
+    "kilos": ("kg", Decimal("1")),
+    "kilogramo": ("kg", Decimal("1")),
+    "kilogramos": ("kg", Decimal("1")),
+    "g": ("kg", Decimal("0.001")),
+    "gr": ("kg", Decimal("0.001")),
+    "grs": ("kg", Decimal("0.001")),
+    "gramo": ("kg", Decimal("0.001")),
+    "gramos": ("kg", Decimal("0.001")),
+    "mg": ("kg", Decimal("0.000001")),
+    "l": ("l", Decimal("1")),
+    "lt": ("l", Decimal("1")),
+    "lts": ("l", Decimal("1")),
+    "litro": ("l", Decimal("1")),
+    "litros": ("l", Decimal("1")),
+    "ml": ("l", Decimal("0.001")),
+    "cc": ("l", Decimal("0.001")),
+}
+
+# Palabras que cuentan piezas dentro de un empaque ("x 12un", "12 Bolsas").
+ENVASES = (
+    r"(?:un|und|unid|unidades|u|pack|packs|bolsas?|botellas?|latas?|sobres?"
+    r"|paquetes?|cajas?|frascos?|barras?|piezas?)"
+)
+
+MEDIDA = (
+    r"(\d+(?:[.,]\d+)?)\s*("
+    + "|".join(sorted(UNIDADES, key=len, reverse=True))
+    + r")\b"
+)
+
+# "26g x 12un"  /  "473ml x 6"
+RE_MULTI_A = re.compile(MEDIDA + r"\s*(?:x|por)\s*(\d+)\s*" + ENVASES + r"?", re.I)
+# "12 Bolsas 17g"  /  "6 botellas de 473ml"
+RE_MULTI_B = re.compile(r"(?:x\s*)?(\d+)\s*" + ENVASES + r"\s*(?:de\s*)?" + MEDIDA, re.I)
+# "600ml Paquete 6un" / "4L Paquete 4un" — el conteo va DESPUÉS de la medida y
+# sin `x` de por medio. El relleno entre ambos NO puede contener dígitos: en
+# "Deli 1Lt D2 Sf Pp 25un" ese "D2" es un código de producto, y sin el corte
+# la regla ataría el litro con las 25 unidades cruzando basura.
+RE_MULTI_C = re.compile(MEDIDA + r"[^\d]{0,18}?(\d+)\s*" + ENVASES + r"\b", re.I)
+# "5Kg", "4.8kg", "500g", "473ml"
+RE_SIMPLE = re.compile(MEDIDA, re.I)
+# Solo conteo: "x 12un" sin peso ni volumen en ningún lado.
+RE_CONTEO = re.compile(r"(?:x\s*)?(\d+)\s*" + ENVASES + r"\b", re.I)
+
+
+def _medida(cantidad: str, unidad: str, veces: str = "1") -> tuple[str, Decimal] | None:
+    numero = dec(cantidad.replace(",", "."))
+    multiplo = dec(veces)
+    base = UNIDADES.get(unidad.lower())
+
+    if numero is None or multiplo is None or base is None:
+        return None
+
+    total = numero * base[1] * multiplo
+
+    return None if total <= CERO else (base[0], total)
+
+
+def parsear_presentacion_nombre(nombre: str) -> tuple[str, Decimal, str] | None:
+    """
+    Heurística: saca la presentación del NOMBRE del producto.
+
+    Es heurística y se etiqueta como tal (`presentacion_origen = NOMBRE`): un
+    analista tiene que poder filtrar por `VTEX` y quedarse solo con lo que el
+    servidor afirmó.
+
+    El multipack se MULTIPLICA a propósito: el precio de la fila es el del
+    empaque completo, así que "26g x 12un" son 312 g, no 26. Sin multiplicar,
+    el precio por kilo de todo pack saldría 12 veces más caro de lo que es.
+    """
+
+    texto = (nombre or "").strip()
+
+    if not texto:
+        return None
+
+    for expresion, orden, regla in (
+        (RE_MULTI_A, "medida_primero", "multipack_medida_x_conteo"),
+        (RE_MULTI_B, "conteo_primero", "multipack_conteo_medida"),
+        (RE_MULTI_C, "medida_primero", "multipack_medida_conteo"),
+    ):
+        encontrados = expresion.findall(texto)
+
+        if not encontrados:
+            continue
+
+        crudo = encontrados[-1]
+
+        if orden == "medida_primero":
+            resultado = _medida(crudo[0], crudo[1], crudo[2])
+        else:
+            resultado = _medida(crudo[1], crudo[2], crudo[0])
+
+        if resultado:
+            return resultado[0], resultado[1], regla
+
+    simples = RE_SIMPLE.findall(texto)
+
+    if simples:
+        resultado = _medida(simples[-1][0], simples[-1][1])
+
+        if resultado:
+            return resultado[0], resultado[1], "medida_simple"
+
+    # Sin peso ni volumen: si el nombre declara un conteo de piezas, la unidad
+    # base es la pieza. Es menos informativo que un kilo, pero es verdad, y
+    # hace comparable un pack de 12 contra uno de 6.
+    conteos = RE_CONTEO.findall(texto)
+
+    if conteos:
+        cantidad = dec(conteos[-1])
+
+        if cantidad and cantidad > CERO:
+            return "un", cantidad, "solo_conteo"
+
+    return None
+
+
+def resolver_presentacion(
+    measurement_unit: str,
+    unit_multiplier: str,
+    nombre: str,
+) -> tuple[str, str, str, str]:
+    """
+    Regla de dos ramas. Devuelve `(unidad_base, cantidad_base, origen, regla)`.
+
+    Rama VTEX   — `measurement_unit != 'un'`: el producto se vende por peso o
+                  volumen variable (carnes, frutas, verduras) y VTEX declara
+                  el tamaño de la pieza en `unit_multiplier`. AUTORITATIVO:
+                  nadie adivina mejor que el servidor cuánto pesa el trozo.
+    Rama NOMBRE — `measurement_unit == 'un'`: el producto es envasado y su
+                  tamaño solo vive en el texto del nombre. HEURÍSTICA.
+    Ninguna     — `DESCONOCIDO` y las derivadas VACÍAS. Un `1` inventado en
+                  `cantidad_base` convierte el precio del empaque en un
+                  "precio por kilo" falso, que es peor que no tener el dato.
+
+    `regla` no es columna del CSV: es trazabilidad. Separa lo que salió de una
+    medida escrita tal cual ("500g") de lo que salió de multiplicar un
+    multipack, que es donde el parser puede equivocarse sin que se note.
+    """
+
+    unidad = (measurement_unit or "").strip().lower()
+
+    if unidad and unidad != "un":
+        multiplicador = dec(unit_multiplier)
+        base = UNIDADES.get(unidad)
+
+        if multiplicador is not None and multiplicador > CERO and base:
+            return base[0], f"{(multiplicador * base[1]).normalize():f}", "VTEX", "vtex"
+
+        # `measurement_unit` raro y sin tabla: no se inventa una equivalencia.
+        return "", "", "DESCONOCIDO", "unidad_no_reconocida"
+
+    parseado = parsear_presentacion_nombre(nombre)
+
+    if parseado:
+        return parseado[0], f"{parseado[1].normalize():f}", "NOMBRE", parseado[2]
+
+    return "", "", "DESCONOCIDO", "sin_medida_en_el_nombre"
+
+
 # Tolerancia del control de peso variable. DOS condiciones, y hay que pasar
 # las dos para que la fila se marque.
 #
@@ -2883,6 +3569,137 @@ async def _orderform_con_cliente(
     return status, datos
 
 
+def enriquecer_fila(
+    fila: Fila,
+    producto: Producto,
+    nodo: Nodo,
+    datos: Any,
+    item: dict[str, str] | None = None,
+) -> None:
+    """
+    Llena las 22 columnas de 1.1.0 sobre una `Fila` ya construida (§5).
+
+    Es PEGAMENTO, a propósito delgado: cada regla vive en su función pura
+    (`calcular_mayorista`, `clasificar_ean`, `resolver_presentacion`,
+    `leer_regimen`, `calcular_precio_por_unidad`) y acá solo se decide qué
+    alimenta a qué. Si esta función empieza a decidir cosas, la regla se
+    volvió imposible de probar sin una respuesta de VTEX al lado.
+
+    Nunca lanza: una fila a medio medir sale con columnas vacías y su estado
+    explicándolas, igual que el resto del motor.
+    """
+
+    # ---- BI-PRECIO ------------------------------------------------------
+    #
+    # El descuento se lee PRIMERO de la medición (viene por sucursal y está
+    # vivo) y solo si no vino, del catálogo (sin contexto de sucursal). El
+    # umbral SOLO existe en el catálogo. Unir las dos fuentes por sku_id es
+    # el mecanismo entero (§1).
+    descuento = leer_descuento(datos)
+
+    if descuento is None:
+        descuento = dec(producto.descuento_catalogo)
+
+    price_cents = entero(fila.price_cents)
+    umbral = entero(producto.bi_umbral)
+
+    veredicto = calcular_mayorista(price_cents, umbral, descuento)
+    completo = veredicto["estado"] == "COMPLETO"
+
+    mayorista_cents = veredicto["mayorista_cents"]
+    mayorista = Decimal(mayorista_cents) / 100 if mayorista_cents is not None else None
+
+    pct = None
+
+    if veredicto["descuento_cents"] is not None and price_cents:
+        pct = Decimal(veredicto["descuento_cents"]) / Decimal(price_cents) * 100
+
+    # Sin COMPLETO el umbral tampoco se publica: un umbral suelto al lado de
+    # un precio invita a que alguien arme el mayorista a mano y a que le
+    # salga distinto que acá.
+    fila.bi_umbral = str(umbral) if (completo and umbral is not None) else ""
+    tri = entero(producto.tri_umbral)
+    fila.tri_umbral_declarado = str(tri) if tri is not None else ""
+    fila.descuento_monto = money(veredicto["descuento"])
+    fila.descuento_monto_cents = (
+        str(veredicto["descuento_cents"])
+        if veredicto["descuento_cents"] is not None
+        else ""
+    )
+    fila.precio_mayorista = money(mayorista) if completo else ""
+    fila.precio_mayorista_cents = str(mayorista_cents) if completo else ""
+    fila.descuento_mayorista_pct = (
+        f"{pct.quantize(CENTAVO)}" if (completo and pct is not None) else ""
+    )
+    fila.biprecio_status = veredicto["estado"]
+    # El motor mide a qty=1 SIEMPRE, así que nunca observa el mayorista
+    # aplicado: lo reconstruye. `SI` solo puede ponerlo algo que haya medido
+    # a qty≥umbral, y hoy eso no existe en el motor. Decir `SI` acá sería
+    # inventar evidencia.
+    fila.precio_mayorista_verificado = "NO" if completo else ""
+
+    # ---- RÉGIMEN PROMOCIONAL -------------------------------------------
+    regimen = leer_regimen(datos)
+
+    fila.promo_regime_id = (
+        regimen["promo_regime_id"] or producto.promo_regime_id_catalogo
+    )
+    fila.promo_regime_name = (
+        regimen["promo_regime_name"] or producto.promo_regime_name_catalogo
+    )
+    fila.payment_method_id = (
+        regimen["payment_method_id"] or producto.payment_method_id_catalogo
+    )
+    fila.price_valid_until = leer_price_valid_until(datos, producto.sku_id)
+
+    # ---- IDENTIDAD Y CALIDAD -------------------------------------------
+    fila.ean_type = clasificar_ean(producto.ean)
+    fila.category_id = producto.category_id
+    fila.sales_channel = SALES_CHANNEL
+    fila.surtido_makro = (
+        "SI" if f"plazaveamko{nodo.node_id}" in (fila.seller_chain or "") else "NO"
+    )
+
+    # ---- PRESENTACIÓN ---------------------------------------------------
+    unidad_base, cantidad_base, origen, _regla = resolver_presentacion(
+        fila.measurement_unit,
+        fila.unit_multiplier,
+        producto.product_name or fila.product_name,
+    )
+
+    fila.unidad_base = unidad_base
+    fila.cantidad_base = cantidad_base
+    fila.presentacion_origen = origen
+
+    cantidad = dec(cantidad_base)
+
+    if cantidad and cantidad > CERO:
+        # Rama VTEX (peso variable): el precio por unidad base ya lo publica
+        # el servidor en `list_price`, y dividir amplifica su redondeo (§4).
+        # Es la MISMA regla que `price_per_unit`, así que se reusa la misma
+        # función pura en vez de repetir el criterio y arriesgar que se
+        # separen.
+        if origen == "VTEX":
+            fila.precio_por_unidad_base, _ = calcular_precio_por_unidad(
+                fila.price_cents,
+                (item or {}).get("listPrice"),
+                fila.unit_multiplier,
+            )
+        elif price_cents:
+            fila.precio_por_unidad_base = money4(
+                Decimal(price_cents) / 100 / cantidad
+            )
+
+        # El mayorista por unidad base SIEMPRE se deriva: VTEX no publica un
+        # `list_price` del precio mayorista, así que acá no hay dato del
+        # servidor que leer. Queda dicho para que nadie lo lea como si
+        # tuviera el mismo respaldo que la línea de arriba.
+        if completo and mayorista_cents is not None:
+            fila.precio_mayorista_por_unidad_base = money4(
+                Decimal(mayorista_cents) / 100 / cantidad
+            )
+
+
 def construir_fila(
     producto: Producto,
     nodo: Nodo,
@@ -3025,6 +3842,10 @@ def construir_fila(
         fila.error = str(datos)[:400]
         fila.error_class = "RATE_LIMITED" if status == 429 else "HTTP_ERROR"
         fila.dq_flags = evaluar_calidad(fila, item, producto)
+        # También acá: un HTTP 500 no borra lo que el catálogo ya sabía del
+        # producto (umbral, EAN, presentación). La fila sale sin precio pero
+        # con su identidad completa, y `biprecio_status` dice SIN_MEDICION.
+        enriquecer_fila(fila, producto, nodo, datos, item)
         return fila
 
     node_resolved, deriva, seller_confirmado = identificar_nodo(
@@ -3109,6 +3930,8 @@ def construir_fila(
         fila.error_class = "BUSINESS_UNAVAILABLE"
 
     fila.dq_flags = evaluar_calidad(fila, item, producto)
+
+    enriquecer_fila(fila, producto, nodo, datos, item)
 
     return fila
 
@@ -3318,6 +4141,13 @@ async def medir(
             error_class="NETWORK_ERROR" if "Timeout" in type(exc).__name__ else "UNKNOWN",
             error=f"{type(exc).__name__}: {exc}"[:400],
         )
+
+        # Sin respuesta no hay precio ni régimen, pero lo que el catálogo ya
+        # había dicho del producto sigue siendo cierto y se escribe igual:
+        # EAN, category_id, presentación, tri declarado. `biprecio_status`
+        # sale SIN_MEDICION, que es exactamente lo que pasó (§5).
+        enriquecer_fila(fila, producto, nodo, None)
+
         return fila
 
 
