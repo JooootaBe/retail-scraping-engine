@@ -98,17 +98,27 @@ El Bife Ancho lo confirma: `price` > `list_price`, imposible en un precio tachad
 - `precio_por_unidad_base` se **lee** de `list_price`. **No** se calcula por división:
   `1.23 ÷ 0.2 = 6.15` y el real es `6.19`. El redondeo de VTEX se amplifica al dividir por un
   multiplicador menor a 1.
-- `discount_pct` va **vacío** en peso variable: calcularlo daría 80% de descuento falso.
-- Guardar además la reconstrucción como control: si difiere de `list_price` en más de un
-  céntimo, es señal de que el multiplicador declarado no corresponde al precio.
+- **`price_per_unit` se corrige junto con ella.** No es una columna nueva: existe desde 1.0.0 y
+  hoy se calcula por división (`makro_plazavea.py:2379`, `venta / 100 / multiplicador`), o sea
+  arrastrando el mismo redondeo. Cuando `unit_multiplier != 1`, **las dos leen `list_price`**.
+  La razón no es cosmética: dejar la vieja dividiendo produce dos columnas con la misma
+  intención y valores distintos —Maracuyá `6.15` en `price_per_unit` contra `6.19` en
+  `precio_por_unidad_base`— sin ninguna forma de saber cuál usar. Una discrepancia así no se
+  descubre leyendo el CSV; se descubre cuando dos análisis dan números distintos.
+- `discount_pct` va **vacío** en peso variable: calcularlo daría 80% de descuento falso. **Ya
+  está protegido desde 1.0.0** (`makro_plazavea.py:2384`, `if multiplicador == 1`) y las 8 filas
+  de peso variable del golden lo traen vacío. Se documenta acá como regla, pero **no es un
+  cambio de 1.1.0** y por eso no figura entre las exclusiones de §10.
+- Guardar la división como control: si difiere de `list_price` en más de un céntimo, es señal de
+  que el multiplicador declarado no corresponde al precio.
 - El peso es un **promedio declarado** ("0.2 kg aprox."), no el peso real de la pieza. Por eso
   `price` en peso variable es estimado y `list_price` es contractual.
 
 **El golden v5 no aplica esta regla, y no se regenera.** La corrección se decidió *después* de
 que la sonda v5 corriera: `golden_v5.csv` guarda `6.1500` para el Maracuyá — la división que este
 apartado señala como equivocada — y lo mismo en las 8/8 filas de peso variable. El golden queda
-como está; `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` se **excluyen** del
-criterio de aceptación (§10). La regla es la de arriba, no la del golden.
+como está; `price_per_unit`, `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` se
+**excluyen** del criterio de aceptación (§10). La regla es la de arriba, no la del golden.
 
 ---
 
@@ -266,6 +276,45 @@ produce el motor.
 
 ---
 
+## 8.1 Flags de selección: `--skus` y `--dry-run`
+
+*(Numerada 8.1 a propósito: `CLAUDE.md` y este documento se citan por número de sección, y
+renumerar §9–§12 rompería esas referencias.)*
+
+Hasta 1.0.0 el motor solo sabe **descubrir**: recorre el árbol de categorías y muestrea. Eso
+hace imposible volver a medir una corrida vieja, porque la selección depende del catálogo vivo.
+Dos flags cierran ese hueco.
+
+### `--skus <lista>`
+
+Salta el descubrimiento y mide una lista explícita de `sku_id` contra todos los nodos de `NODOS`.
+
+- **Máximo 20 SKUs.** No es un modo de extracción masiva: es para responder una pregunta puntual
+  o remedir un baseline.
+- **Incompatible con `--catalogo` y `--muestra`.** O lista explícita, o descubrimiento; las dos
+  juntas dejarían la selección sin una única fuente.
+- **Un SKU pedido y no encontrado SE ESCRIBE igual**, con el estado que corresponda. Si
+  desapareciera de la salida no habría forma de distinguir *no existe* de *no lo pedí* — es la
+  misma regla de §2 y del principio de que ninguna fila se descarta en silencio.
+- El manifiesto registra `modo: "skus_explicitos"`, para poder **filtrar estas corridas** al
+  armar la serie de tiempo. Una remedición dirigida no es una muestra del catálogo y no debe
+  promediarse con las que sí lo son.
+- **No viola la regla del `panel.json`.** Lo que v11 sacó del motor fue un archivo en disco que
+  se leía para decidir qué medir, y que envejecía en silencio. Acá la lista viaja en la línea de
+  comandos, queda escrita en el manifiesto de esa corrida y se resuelve contra el catálogo de
+  esa corrida: no hay foto vieja disfrazada de presente.
+
+### `--dry-run`
+
+Mide e imprime a consola. **No escribe** CSV, ni manifiesto, ni evidencia cruda — o sea, no crea
+la carpeta de corrida de §7.
+
+- Aplica a **cualquier** selección, no solo a `--skus`.
+- Uso previsto: consultar un SKU puntual, o probar una categoría nueva, sin ensuciar la serie
+  con una corrida que nadie va a querer leer después.
+
+---
+
 ## 9. Bugs conocidos a corregir
 
 | Bug | Corrección |
@@ -278,6 +327,15 @@ produce el motor.
 | Sondas v2/v3: `V1_PY` busca `v1.py`, el archivo tiene otro nombre | renombrar sondas con ordinal: `01_…` … `05_…` |
 | `pyproject.toml` vacío | metadata + `where = ["src"]` + `pip install -e .` |
 | `--reiniciar` borra los CSVs para "reiniciar la serie": con una carpeta inmutable por corrida (§7) no hay archivo acumulado que borrar, y el flag apuntaría a historia ya cerrada | definir semántica nueva y explícita (¿vaciar `data/<colector>/` entero?, ¿solo `runs.jsonl` + `last_run.json`?) o **eliminar el flag**. Lo que no puede quedar es el comportamiento viejo con el layout nuevo |
+| `fq=skuId:` filtra por SKU pero devuelve el **producto entero**, con todas sus variantes, y `parsear_producto` lee `items[0]`: un multivariante se mide en la variante equivocada y la fila sale con otro `sku_id` | reordenar `items` poniendo el SKU pedido en cabeza **antes** de parsear. Sin eso, `--skus` mide algo distinto de lo que se le pidió y parece un cambio del retailer |
+| `parsear_producto` descarta lo que la cadena no tiene en stock (`AvailableQuantity` vacío) | correcto al **descubrir** —no tiene sentido muestrear lo que nadie puede comprar— y equivocado al medir una **lista explícita**: esconde justo el caso que se quería ver. En `--skus` hay que saltar ese filtro y dejar que el estado lo cuente la medición |
+
+Los dos salieron de implementar `--skus` en la sonda v5, donde ya están resueltos
+(`ordenar_items` y `producto_forzado`); se anotan acá porque el motor los va a heredar tal cual.
+
+**`fq=skuId:` acepta batch**, igual que el `fq=productId:` que ya usa `refrescar_stock_cadena`:
+20 SKUs se resuelven en **2 requests, no 20**. El motor debe usarlo — medido en la remedición
+del golden, la fase de catálogo entera costó 2 de 46 requests.
 
 ---
 
@@ -288,15 +346,39 @@ contra `tests/fixtures/makro_plazavea/golden_v5.csv` (40 filas, 78 columnas: las
 más las 22 de §5).
 
 Debe reproducir las 40 filas columna por columna, **con estas exclusiones explícitas**. Sin
-ellas el criterio es insatisfacible por construcción:
+ellas el criterio es insatisfacible por construcción. Son **tres grupos, por tres razones
+distintas** — mezclarlos haría pasar por "ajuste del criterio" lo que es un cambio de código:
 
-- **Volátiles** — cambian en cada corrida y nunca pueden coincidir: `run_id` (el golden trae
-  `v5_20260820_000016` en las 40 filas), `timestamp`, `fecha`, y `schema_version` (§6.7 lo sube
-  a `"4"`; el golden nació con `"3"`).
-- **Cambiadas por diseño** — el golden es anterior a la decisión y no se regenera:
-  `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` (§4: se leen de `list_price`, el
-  golden los dividió), `discount_pct` en las filas de peso variable (§4: va vacío) y
-  `fulfillment_type` donde 1.1.0 reclasifica `desconocido` → `operador_externo` (§9).
+**1. Volátiles de corrida** — artefactos de haber corrido, no datos:
+
+- `run_id` (el golden trae `v5_20260820_000016` en las 40 filas), `timestamp`, `fecha`.
+- `schema_version`: §6.7 lo sube a `"4"` y el golden nació con `"3"`.
+
+**2. Volátiles del mundo** — `chain_stock`.
+
+No es artefacto de la corrida: es inventario de cadena, y cambia porque Makro vende. Excluirla
+no relaja el criterio, lo hace medible: exigirla sería exigir que el retailer no venda nada
+entre el golden y la validación.
+
+Verificado el **21-ago-2026** (corrida `v5_20260821_191415`, sonda v5 en modo `--skus` sobre los
+mismos 20 SKUs y 2 nodos, 46 requests): **0 diferencias de precio y 0 estructurales**. La única
+columna que se movió fue `chain_stock`, en **38 de 40 filas** (`164→563`, `986→967`, `203→105`).
+Las 2 filas exactas son las de `11542387`, el único SKU cuyo stock de cadena se quedó quieto.
+Con esta exclusión el diff da **40/40**.
+
+Ese resultado vale doble: confirma que `golden_v5.csv` **sirve como baseline** —la firma
+logística, el umbral bi, `biprecio_status` y `ean_type` no se movieron entre las dos
+corridas— y que las otras 74 columnas comparables son estables al día.
+
+**3. Cambiadas por diseño** — el golden es anterior a la decisión y no se regenera:
+
+- `price_per_unit`, `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` (§4: se leen
+  de `list_price`; el golden las tres las dividió).
+- `fulfillment_type`, donde 1.1.0 reclasifica `desconocido` → `operador_externo` (§9).
+
+`discount_pct` **no se excluye**: está protegido desde 1.0.0 (`makro_plazavea.py:2384`) y el
+golden ya lo trae vacío en las 8 filas de peso variable. No es un cambio de 1.1.0, así que
+exigirlo exacto es gratis.
 
 El resto debe coincidir **exacto**, valor por valor. Si no, no está listo.
 

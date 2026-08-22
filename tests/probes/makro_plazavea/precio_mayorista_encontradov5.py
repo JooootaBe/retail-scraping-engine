@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import csv
 import hashlib
 import importlib.util
@@ -639,16 +640,22 @@ COLUMNAS = COLUMNAS_MOTOR + COLUMNAS_NUEVAS
 # ===========================================================================
 
 
-def leer_catalogo(crudo: dict, categoria: dict) -> dict[str, Any] | None:
+def leer_catalogo(crudo: dict, categoria: dict,
+                  producto: Any = None) -> dict[str, Any] | None:
     """
     Lo que SOLO el catálogo sabe, más el `Producto` del motor.
 
     `parsear_producto` es del motor y ya descarta basura y productos sin
     stock de cadena. Acá encima se leen los tres campos que el checkout no
     devuelve: el umbral bi, el umbral tri y la ruta de IDs de categoría.
+
+    `producto` se puede pasar ya armado: el modo `--skus` necesita medir
+    también lo que `parsear_producto` descartaría (ver `producto_forzado`),
+    y todo lo demás de esta función se lee igual.
     """
 
-    producto = MK.parsear_producto(crudo)
+    if producto is None:
+        producto = MK.parsear_producto(crudo)
 
     if not producto or not producto.sku_id:
         return None
@@ -1141,6 +1148,315 @@ async def auditar_mayorista(cliente, fila: dict, nodo, registros: dict) -> dict:
 # ===========================================================================
 
 
+# ===========================================================================
+# FASE 1 — MODO --skus: LISTA FIJA, SIN DESCUBRIMIENTO
+# ===========================================================================
+#
+# Por qué existe
+# --------------
+# El descubrimiento elige los SKUs con `elegir_de_categoria`, que depende
+# del catálogo VIVO: dos corridas separadas por días no eligen lo mismo, así
+# que no se puede volver a medir una corrida vieja. Para comparar contra un
+# golden hace falta lo contrario: los SKUs entran por parámetro y el
+# catálogo solo se consulta para los campos que únicamente él conoce
+# (umbral bi/tri, descuento declarado, category_id).
+#
+# Esto NO reintroduce el "archivo de entrada" que v11 sacó del motor: la
+# lista viaja en la línea de comandos, no en disco, y solo la usa esta
+# sonda. El motor sigue descubriendo cada corrida.
+
+LOTE_SKUS = 10        # `fq=skuId:` se acumulan en una sola consulta
+
+
+def parsear_lista_skus(texto: str) -> list[str]:
+    """Acepta comas, espacios y saltos de línea; conserva el orden y dedupe."""
+
+    crudos = [t.strip() for t in re.split(r"[,\s]+", texto or "") if t.strip()]
+
+    vistos: set[str] = set()
+    lista: list[str] = []
+
+    for sku in crudos:
+        if sku in vistos:
+            continue
+
+        vistos.add(sku)
+        lista.append(sku)
+
+    return lista
+
+
+def ordenar_items(crudo: dict, sku_id: str) -> bool:
+    """
+    Pone el SKU pedido en `items[0]`, que es donde el motor lo va a buscar.
+
+    `fq=skuId:` filtra por SKU pero devuelve el PRODUCTO entero, con todas
+    sus variantes. `parsear_producto` lee `items[0]`: sin este reordenamiento
+    un producto multivariante se mediría en la variante equivocada y la fila
+    saldría con otro `sku_id` — parecería una diferencia contra el golden y
+    sería un bug de esta sonda.
+    """
+
+    items = crudo.get("items") or []
+
+    for posicion, item in enumerate(items):
+        if MK.s(item.get("itemId")) == sku_id:
+            if posicion:
+                items.insert(0, items.pop(posicion))
+
+            return True
+
+    return False
+
+
+def producto_forzado(crudo: dict) -> Any:
+    """
+    El `Producto` del motor, saltando el filtro de stock de cadena.
+
+    `parsear_producto` descarta lo que la cadena no tiene disponible. Al
+    DESCUBRIR eso es correcto —no tiene sentido medir lo que nadie puede
+    comprar—, pero al REMEDIR es al revés: un SKU del golden que se quedó
+    sin stock hay que medirlo igual, porque perder la fila esconde
+    justamente el cambio que se quería ver.
+
+    La disponibilidad se fuerza sobre una COPIA del crudo y después se borra
+    `stock_catalog`, para no dejar registrado un número que el servidor no
+    dijo. La disponibilidad real de la corrida sigue saliendo de la medición
+    (`availability`) y del stock de cadena refrescado (`chain_stock`).
+    """
+
+    copia = copy.deepcopy(crudo)
+
+    items = copia.get("items") or []
+
+    if not items:
+        return None
+
+    vendedores = items[0].get("sellers") or []
+
+    if not vendedores:
+        return None
+
+    oferta = vendedores[0].setdefault("commertialOffer", {})
+
+    if not oferta.get("AvailableQuantity"):
+        oferta["AvailableQuantity"] = 1
+
+    producto = MK.parsear_producto(copia)
+
+    if producto is not None:
+        producto.stock_catalog = ""
+
+    return producto
+
+
+async def traer_por_skus(cliente, sku_ids: list[str],
+                         estado: dict) -> list[dict] | None:
+    """
+    FASE 1 del modo `--skus`: el catálogo de una lista fija, en pocas requests.
+
+    Mismo truco que `refrescar_stock_cadena` del motor: varios `fq=` en una
+    sola consulta. 20 SKUs salen en 2 requests en vez de 20, que es lo que
+    deja presupuesto para las 40 mediciones.
+
+    Todo SKU que no vuelva queda anotado en `avisos`. Un SKU que desaparece
+    del catálogo no es un error de la sonda: es el dato.
+    """
+
+    log(f"FASE 1 — catálogo de {len(sku_ids)} SKUs fijos (sin descubrimiento)")
+
+    categoria = {"ruta_nombres": ("(lista fija)",), "ruta": "(lista fija)"}
+
+    por_sku: dict[str, dict] = {}
+    forzados: list[str] = []
+
+    lotes = [sku_ids[i:i + LOTE_SKUS] for i in range(0, len(sku_ids), LOTE_SKUS)]
+
+    for numero, lote in enumerate(lotes, 1):
+        filtros = "&".join(f"fq=skuId:{sku}" for sku in lote)
+
+        url = (
+            f"{MK.BASE_URL}/api/catalog_system/pub/products/search"
+            f"?{filtros}&_from=0&_to={len(lote) * 2 - 1}&sc={MK.SALES_CHANNEL}"
+        )
+
+        try:
+            status, datos, _ = await cliente.pedir(url)
+        except MK.TopeAgotadoError:
+            # Igual que en el motor: el presupuesto agotado es una condición
+            # de CORRIDA. No se inventa un catálogo a medias.
+            raise
+        except Exception as exc:
+            estado["avisos"].append(
+                f"Lote {numero}: {type(exc).__name__} al pedir el catálogo."
+            )
+            continue
+
+        if status >= 400 or not isinstance(datos, list):
+            estado["avisos"].append(f"Lote {numero}: HTTP {status}.")
+            continue
+
+        pedidos = set(lote)
+
+        for crudo in datos:
+            if not isinstance(crudo, dict):
+                continue
+
+            # Un producto puede traer varias variantes; solo interesan las
+            # que se pidieron, y cada una se lee con SU item en cabeza.
+            # `ordenar_items` MUTA el crudo, así que se llama una vez por
+            # SKU y justo antes de leerlo, nunca por adelantado para todos.
+            for sku in lote:
+                if sku in por_sku or not ordenar_items(crudo, sku):
+                    continue
+
+                producto = producto_forzado(crudo)
+
+                if producto is None or producto.sku_id != sku:
+                    continue
+
+                if not MK.parsear_producto(crudo):
+                    forzados.append(sku)
+
+                registro = leer_catalogo(crudo, categoria, producto=producto)
+
+                if registro:
+                    por_sku[sku] = registro
+
+        faltan = pedidos - set(por_sku)
+
+        log(f"  lote {numero}/{len(lotes)}: {len(lote) - len(faltan)}/{len(lote)} "
+            f"resueltos  req={cliente.contador}/{cliente.tope}")
+
+    seleccion = [por_sku[sku] for sku in sku_ids if sku in por_sku]
+
+    ausentes = [sku for sku in sku_ids if sku not in por_sku]
+
+    if ausentes:
+        estado["avisos"].append(
+            f"{len(ausentes)} SKUs no volvieron del catálogo y quedaron sin medir: "
+            + ", ".join(ausentes)
+        )
+
+    if forzados:
+        estado["avisos"].append(
+            f"{len(forzados)} SKUs sin stock de cadena se midieron igual "
+            "(`parsear_producto` los habría descartado): " + ", ".join(forzados)
+        )
+
+    estado["skus_ausentes"] = ausentes
+    estado["skus_forzados"] = forzados
+
+    if not seleccion:
+        estado["avisos"].append("Ningún SKU de la lista existe en el catálogo.")
+        return None
+
+    return seleccion
+
+
+async def descubrir_seleccion(cliente, argumentos, estado) -> list[dict] | None:
+    """
+    FASE 1 clásica: recorre las categorías objetivo y elige los SKUs.
+
+    Devuelve `None` cuando la fase falló de un modo que deja la corrida
+    sin nada que medir; el aviso ya quedó en `estado`.
+    """
+
+    log("FASE 1 — catálogo (umbral bi/tri, descuento declarado, category_id)")
+
+    status, arbol, _ = await cliente.pedir(
+        f"{MK.BASE_URL}/api/catalog_system/pub/category/tree/3"
+    )
+
+    if status >= 400 or not isinstance(arbol, list):
+        estado["avisos"].append(f"El árbol de categorías respondió HTTP {status}.")
+        return None
+
+    por_ruta = {c["ruta_nombres"]: c for c in aplanar(arbol, [], [], 1, [])}
+
+    seleccion: list[dict] = []
+
+    for objetivo in CATEGORIAS_OBJETIVO:
+        categoria = por_ruta.get(objetivo)
+
+        if not categoria:
+            estado["avisos"].append(
+                f"La categoría {' > '.join(objetivo)} no existe en el árbol vivo."
+            )
+            continue
+
+        # RUTA COMPLETA DE IDS: `fq=C:/604/` devuelve HTTP 200 con
+        # cero productos, sin error. La forma que filtra de verdad
+        # es `fq=C:/399/604/`.
+        url = (
+            f"{MK.BASE_URL}/api/catalog_system/pub/products/search"
+            f"?fq=C:{categoria['ruta_ids']}"
+            f"&_from=0&_to={VENTANA - 1}&sc={MK.SALES_CHANNEL}"
+        )
+
+        try:
+            status, datos, _ = await cliente.pedir(url)
+        except Exception as exc:
+            estado["avisos"].append(
+                f"{categoria['ruta']}: {type(exc).__name__} al pedir el catálogo."
+            )
+            continue
+
+        if status >= 400 or not isinstance(datos, list):
+            estado["avisos"].append(f"{categoria['ruta']}: HTTP {status}.")
+            continue
+
+        candidatos: list[dict] = []
+
+        for crudo in datos:
+            if not isinstance(crudo, dict):
+                continue
+
+            registro = leer_catalogo(crudo, categoria)
+
+            if registro:
+                candidatos.append(registro)
+
+        elegidos = elegir_de_categoria(candidatos, POR_CATEGORIA)
+        seleccion.extend(elegidos)
+
+        con_bi = sum(
+            1 for r in elegidos
+            if r["bi_umbral"] is not None and r["descuento_catalogo"] is not None
+        )
+
+        estado["categorias"].append(
+            {
+                "ruta": categoria["ruta"],
+                "id": categoria["id"],
+                "candidatos": len(candidatos),
+                "elegidos": len(elegidos),
+                "con_biprecio_catalogo": con_bi,
+            }
+        )
+
+        log(f"  [{categoria['id']:>5}] {categoria['ruta'][:42]:<42} "
+            f"candidatos={len(candidatos):>3} elegidos={len(elegidos)} "
+            f"bi={con_bi}  req={cliente.contador}/{argumentos.tope}")
+
+    # Deduplicar por SKU y recortar a N_SKUS, sin perder el orden
+    # por categoría (las últimas categorías son las de peso
+    # variable y no pueden quedar fuera por un empate).
+    vistos: set[str] = set()
+    unicos: list[dict] = []
+
+    for registro in seleccion:
+        if registro["sku_id"] in vistos:
+            continue
+
+        vistos.add(registro["sku_id"])
+        unicos.append(registro)
+
+    seleccion = unicos[:N_SKUS]
+
+    return seleccion
+
+
 async def correr(argumentos) -> dict[str, Any]:
     from playwright.async_api import async_playwright
 
@@ -1178,97 +1494,14 @@ async def correr(argumentos) -> dict[str, Any]:
             # ---------------- FASE 1: catálogo ----------------
             cliente.fase = "descubrimiento"
 
-            log("FASE 1 — catálogo (umbral bi/tri, descuento declarado, category_id)")
+            if argumentos.skus:
+                seleccion = await traer_por_skus(cliente, argumentos.skus, estado)
+            else:
+                seleccion = await descubrir_seleccion(cliente, argumentos, estado)
 
-            status, arbol, _ = await cliente.pedir(
-                f"{MK.BASE_URL}/api/catalog_system/pub/category/tree/3"
-            )
-
-            if status >= 400 or not isinstance(arbol, list):
-                estado["avisos"].append(f"El árbol de categorías respondió HTTP {status}.")
+            if seleccion is None:
                 return estado
 
-            por_ruta = {c["ruta_nombres"]: c for c in aplanar(arbol, [], [], 1, [])}
-
-            seleccion: list[dict] = []
-
-            for objetivo in CATEGORIAS_OBJETIVO:
-                categoria = por_ruta.get(objetivo)
-
-                if not categoria:
-                    estado["avisos"].append(
-                        f"La categoría {' > '.join(objetivo)} no existe en el árbol vivo."
-                    )
-                    continue
-
-                # RUTA COMPLETA DE IDS: `fq=C:/604/` devuelve HTTP 200 con
-                # cero productos, sin error. La forma que filtra de verdad
-                # es `fq=C:/399/604/`.
-                url = (
-                    f"{MK.BASE_URL}/api/catalog_system/pub/products/search"
-                    f"?fq=C:{categoria['ruta_ids']}"
-                    f"&_from=0&_to={VENTANA - 1}&sc={MK.SALES_CHANNEL}"
-                )
-
-                try:
-                    status, datos, _ = await cliente.pedir(url)
-                except Exception as exc:
-                    estado["avisos"].append(
-                        f"{categoria['ruta']}: {type(exc).__name__} al pedir el catálogo."
-                    )
-                    continue
-
-                if status >= 400 or not isinstance(datos, list):
-                    estado["avisos"].append(f"{categoria['ruta']}: HTTP {status}.")
-                    continue
-
-                candidatos: list[dict] = []
-
-                for crudo in datos:
-                    if not isinstance(crudo, dict):
-                        continue
-
-                    registro = leer_catalogo(crudo, categoria)
-
-                    if registro:
-                        candidatos.append(registro)
-
-                elegidos = elegir_de_categoria(candidatos, POR_CATEGORIA)
-                seleccion.extend(elegidos)
-
-                con_bi = sum(
-                    1 for r in elegidos
-                    if r["bi_umbral"] is not None and r["descuento_catalogo"] is not None
-                )
-
-                estado["categorias"].append(
-                    {
-                        "ruta": categoria["ruta"],
-                        "id": categoria["id"],
-                        "candidatos": len(candidatos),
-                        "elegidos": len(elegidos),
-                        "con_biprecio_catalogo": con_bi,
-                    }
-                )
-
-                log(f"  [{categoria['id']:>5}] {categoria['ruta'][:42]:<42} "
-                    f"candidatos={len(candidatos):>3} elegidos={len(elegidos)} "
-                    f"bi={con_bi}  req={cliente.contador}/{argumentos.tope}")
-
-            # Deduplicar por SKU y recortar a N_SKUS, sin perder el orden
-            # por categoría (las últimas categorías son las de peso
-            # variable y no pueden quedar fuera por un empate).
-            vistos: set[str] = set()
-            unicos: list[dict] = []
-
-            for registro in seleccion:
-                if registro["sku_id"] in vistos:
-                    continue
-
-                vistos.add(registro["sku_id"])
-                unicos.append(registro)
-
-            seleccion = unicos[:N_SKUS]
             estado["registros"] = {r["sku_id"]: r for r in seleccion}
 
             if not seleccion:
@@ -1899,6 +2132,209 @@ def escribir_md(estado: dict, argumentos) -> Path:
 # ===========================================================================
 
 
+# ===========================================================================
+# COMPARACIÓN CONTRA UNA CORRIDA DE REFERENCIA
+# ===========================================================================
+#
+# La pregunta que responde esta sección no es "¿coinciden?", es "¿en QUÉ
+# coinciden?". Dos corridas del mismo SKU separadas por días tienen que
+# diferir en precio —eso es el negocio— y NO tienen que diferir en la firma
+# logística, el umbral bi ni el tipo de EAN. Por eso las columnas se
+# reparten en familias antes de contar nada: un total de diferencias sin
+# familia no distingue "Makro movió precios" de "el baseline no sirve".
+
+FAMILIA_PRECIO = {
+    "price", "list_price", "base_price", "price_cents", "discount_pct",
+    "price_per_unit", "descuento_monto", "descuento_monto_cents",
+    "precio_mayorista", "precio_mayorista_cents", "descuento_mayorista_pct",
+    "precio_por_unidad_base", "precio_mayorista_por_unidad_base",
+    "price_valid_until",
+}
+
+# Lo que define QUÉ se midió y CÓMO lo resolvió VTEX. Si algo de acá se
+# mueve, el golden dejó de describir el mismo objeto.
+FAMILIA_ESTRUCTURA = {
+    # identidad del SKU
+    "schema_version", "retailer", "branch", "node_id", "product_id", "sku_id",
+    "sku_ref", "ean", "ean_type", "product_name", "brand", "category",
+    "category_id", "seller_id", "url", "currency", "sales_channel", "method",
+    # unidad y presentación
+    "measurement_unit", "unit_multiplier", "unidad_base", "cantidad_base",
+    "presentacion_origen",
+    # firma logística y su veredicto
+    "warehouse_id", "dock_id", "courier_id", "courier_name", "seller_chain",
+    "polygon_name", "polygon_drift", "node_resolved", "logistics_status",
+    "fulfillment_type", "surtido_makro", "postal_sent", "postal_resolved",
+    "neighborhood_resolved",
+    # forma del bi-precio (el umbral es del catálogo, no del precio)
+    "bi_umbral", "tri_umbral_declarado", "biprecio_status",
+}
+
+# Ni precio ni estructura: el estado del mundo en el momento de medir.
+# Cambia solo con que la tienda venda una unidad.
+FAMILIA_ESTADO = {
+    "availability", "chain_stock", "stock_signal", "price_status",
+    "fulfillment_confirmed", "sla_selected", "sla_count", "sla_status",
+    "sla_name", "delivery_channel", "shipping_cost", "shipping_estimate",
+    "dq_flags", "http_status", "error_class", "error", "recon_status",
+    "precio_mayorista_verificado", "promo_regime_id", "promo_regime_name",
+    "payment_method_id",
+}
+
+
+def familia(columna: str) -> str:
+    if columna in FAMILIA_PRECIO:
+        return "PRECIO"
+
+    if columna in FAMILIA_ESTRUCTURA:
+        return "ESTRUCTURA"
+
+    if columna in FAMILIA_ESTADO:
+        return "ESTADO"
+
+    # Una columna sin familia no se esconde en un total: se nombra.
+    return "SIN_CLASIFICAR"
+
+
+def comparar_contra(filas: list[dict], referencia: Path,
+                    ignorar: list[str]) -> None:
+    """
+    Diferencia celda por celda contra un CSV de referencia. NO escribe nada.
+
+    Clave `(sku_id, node_id)`, que es la del formato largo. Las columnas de
+    `ignorar` se saltan porque son volátiles POR CONSTRUCCIÓN (run_id,
+    timestamp, fecha): incluirlas haría que las 40 filas difirieran siempre
+    y la comparación no diría nada.
+    """
+
+    log("")
+    log("=" * 78)
+    log(f"COMPARACIÓN contra {referencia}")
+    log(f"ignorando: {', '.join(ignorar) or '(nada)'}")
+    log("=" * 78)
+
+    if not referencia.exists():
+        log(f"No existe {referencia}: no hay contra qué comparar.")
+        return
+
+    with referencia.open(newline="", encoding="utf-8") as archivo:
+        lector = csv.DictReader(archivo)
+        golden = {(f["sku_id"], f["node_id"]): f for f in lector}
+        columnas_ref = list(lector.fieldnames or [])
+
+    actual = {(f["sku_id"], f["node_id"]): f for f in filas}
+
+    solo_ref = sorted(set(golden) - set(actual))
+    solo_act = sorted(set(actual) - set(golden))
+
+    faltan_col = [c for c in columnas_ref if c not in COLUMNAS]
+    sobran_col = [c for c in COLUMNAS if c not in columnas_ref]
+
+    if faltan_col or sobran_col:
+        log("ESQUEMA distinto — la comparación celda por celda solo cubre las "
+            "columnas comunes:")
+
+        if faltan_col:
+            log(f"  solo en la referencia: {', '.join(faltan_col)}")
+
+        if sobran_col:
+            log(f"  solo en esta corrida:  {', '.join(sobran_col)}")
+
+        log("")
+
+    comparables = [
+        c for c in COLUMNAS if c in columnas_ref and c not in set(ignorar)
+    ]
+
+    claves = sorted(set(golden) & set(actual))
+
+    exactas = 0
+    por_columna: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
+
+    for clave in claves:
+        sku_id, node_id = clave
+        difiere = False
+
+        for columna in comparables:
+            antes = (golden[clave].get(columna) or "").strip()
+            ahora = str(actual[clave].get(columna) or "").strip()
+
+            if antes != ahora:
+                difiere = True
+                por_columna[columna].append((sku_id, node_id, antes, ahora))
+
+        if not difiere:
+            exactas += 1
+
+    total_ref = len(golden)
+
+    log(f"filas en la referencia : {total_ref}")
+    log(f"filas en esta corrida  : {len(actual)}")
+    log(f"filas comparadas       : {len(claves)}  "
+        f"({len(comparables)} columnas comparables)")
+    log("")
+    log(f"COINCIDEN EXACTO: {exactas}/{total_ref}  "
+        f"(difieren {len(claves) - exactas}, ausentes {len(solo_ref)})")
+
+    if solo_ref:
+        log(f"  en la referencia y no acá: "
+            + ", ".join(f"{s}/{n}" for s, n in solo_ref))
+
+    if solo_act:
+        log(f"  acá y no en la referencia: "
+            + ", ".join(f"{s}/{n}" for s, n in solo_act))
+
+    log("")
+
+    if not por_columna:
+        log("Ninguna columna comparable difiere.")
+        log("=" * 78)
+        return
+
+    log("COLUMNAS QUE DIFIEREN")
+    log("-" * 78)
+
+    orden = {"ESTRUCTURA": 0, "SIN_CLASIFICAR": 1, "PRECIO": 2, "ESTADO": 3}
+
+    for columna in sorted(por_columna,
+                          key=lambda c: (orden[familia(c)], -len(por_columna[c]), c)):
+        casos = por_columna[columna]
+
+        log(f"[{familia(columna):<14}] {columna}  — {len(casos)} filas")
+
+        for sku_id, node_id, antes, ahora in casos:
+            log(f"    {sku_id:>9}/{node_id}  {antes or '(vacío)'!s:>18}"
+                f"  ->  {ahora or '(vacío)'!s}")
+
+    log("")
+    log("VEREDICTO")
+    log("-" * 78)
+
+    tocadas = {familia(c) for c in por_columna}
+
+    for nombre in ("PRECIO", "ESTRUCTURA", "ESTADO", "SIN_CLASIFICAR"):
+        columnas = sorted(c for c in por_columna if familia(c) == nombre)
+
+        log(f"{nombre:<14} {len(columnas):>2} columnas"
+            + (f": {', '.join(columnas)}" if columnas else ""))
+
+    log("")
+
+    if "ESTRUCTURA" in tocadas or "SIN_CLASIFICAR" in tocadas:
+        log("Hay diferencias ESTRUCTURALES: el golden ya no describe el mismo")
+        log("objeto medido, así que no sirve como baseline de precios sin")
+        log("revisar antes qué cambió de forma.")
+    elif "PRECIO" in tocadas:
+        log("Las diferencias son SOLO de precio (y estado de la tienda si")
+        log("aparece arriba). La estructura se sostiene: el golden sigue")
+        log("sirviendo de baseline y lo que se movió son los precios.")
+    else:
+        log("Solo cambió el estado de la tienda (stock/SLA). Ni precio ni")
+        log("estructura se movieron.")
+
+    log("=" * 78)
+
+
 def parsear_argumentos() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="v5 — validación del esquema completo contra dos nodos."
@@ -1911,7 +2347,37 @@ def parsear_argumentos() -> argparse.Namespace:
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--sin-evidencia", action="store_true")
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--skus",
+        default="",
+        help="Lista fija de sku_id (comas o espacios). Salta el descubrimiento "
+             "y mide SOLO esos, contra los mismos dos nodos. Sirve para "
+             "remedir una corrida vieja; el descubrimiento no es reproducible "
+             "porque depende del catálogo vivo.",
+    )
+    parser.add_argument(
+        "--comparar",
+        default="",
+        help="CSV de referencia contra el que diferenciar las filas de esta "
+             "corrida, celda por celda. Solo imprime; no toca el archivo.",
+    )
+    parser.add_argument(
+        "--ignorar",
+        default="run_id,timestamp,fecha",
+        help="Columnas excluidas de --comparar (por defecto las volátiles "
+             "por construcción).",
+    )
+    parser.add_argument(
+        "--sin-archivos",
+        action="store_true",
+        help="No escribe el CSV ni el MD de la corrida. Para una remedición "
+             "que solo tiene que responder una pregunta en consola.",
+    )
+
+    argumentos = parser.parse_args()
+    argumentos.skus = parsear_lista_skus(argumentos.skus)
+
+    return argumentos
 
 
 async def principal() -> int:
@@ -1931,6 +2397,9 @@ async def principal() -> int:
     log(f"motor {MOTOR_PY.name} v{MK.VERSION} · run_id {RUN_ID}")
     log(f"nodos: {', '.join(n.node_id + ' ' + n.branch for n in NODOS)}")
     log(f"tope {argumentos.tope} requests · intervalo {argumentos.intervalo}s")
+
+    if argumentos.skus:
+        log(f"modo LISTA FIJA: {len(argumentos.skus)} SKUs, sin descubrimiento")
     log("=" * 78)
     log("")
 
@@ -1942,12 +2411,17 @@ async def principal() -> int:
 
     log("")
 
-    ruta_csv = escribir_csv(estado["filas"])
-    ruta_md = escribir_md(estado, argumentos)
-
     log("=" * 78)
-    log(f"CSV  {ruta_csv}  ({len(estado['filas'])} filas × {len(COLUMNAS)} columnas)")
-    log(f"MD   {ruta_md}")
+
+    if argumentos.sin_archivos:
+        log(f"sin archivos: {len(estado['filas'])} filas × {len(COLUMNAS)} columnas "
+            "quedaron solo en memoria (--sin-archivos)")
+    else:
+        ruta_csv = escribir_csv(estado["filas"])
+        ruta_md = escribir_md(estado, argumentos)
+
+        log(f"CSV  {ruta_csv}  ({len(estado['filas'])} filas × {len(COLUMNAS)} columnas)")
+        log(f"MD   {ruta_md}")
 
     if MK.GUARDAR_EVIDENCIA:
         log(f"raw  {SALIDA / 'raw' / MK.ahora().strftime('%Y-%m-%d') / (RUN_ID + '.jsonl.gz')}")
@@ -1959,6 +2433,13 @@ async def principal() -> int:
         log(f"aviso: {aviso}")
 
     log("=" * 78)
+
+    if argumentos.comparar:
+        comparar_contra(
+            estado["filas"],
+            Path(argumentos.comparar),
+            parsear_lista_skus(argumentos.ignorar),
+        )
 
     esperadas = len(estado["registros"]) * len(NODOS)
 
