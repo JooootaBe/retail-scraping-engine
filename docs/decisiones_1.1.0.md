@@ -389,22 +389,28 @@ evidencia de qué medía el motor antes de estos cambios y no se reemplaza para 
 
 ## 11. Verificaciones pendientes — no bloquean 1.1.0
 
-- **Auditoría de la fórmula en umbral alto — VERIFICADA en 15 y 24; queda 12.**
+- **Auditoría de la fórmula en umbral alto — RESUELTA en todo el rango observado (2 a 24).**
   La fórmula de §1 se probó originalmente solo en umbrales 2, 3 y 4, y los altos son donde
   están los descuentos grandes. El motor ya tiene la fase que lo cierra
-  (`--auditoria-mayorista`, remide a `qty = bi_umbral`), y el 21-ago-2026 dio **exacto al
-  centavo en los dos umbrales altos medidos** (corrida `run_20260821_202039`):
+  (`--auditoria-mayorista`, que remide a `qty = bi_umbral`), y dio **exacto al centavo en los
+  tres umbrales altos medidos**:
 
-  | SKU | Producto | Umbral | Unitario | Descuento | Reconstruido | **Medido** |
-  |---|---|---|---|---|---|---|
-  | 49311 | MONSTER Ultra Lata 473ml | 24 | 7.90 | 0.58 | 732 | **732** |
-  | 12274723 | Lejía SAPOLIO Original 770g | 15 | 2.00 | 0.51 | 149 | **149** |
+  | SKU | Producto | Umbral | Unitario | Descuento | Reconstruido | **Medido** | Corrida |
+  |---|---|---|---|---|---|---|---|
+  | 49311 | MONSTER Ultra Lata 473ml | 24 | 7.90 | 0.58 | 732 | **732** | `run_20260821_202039` |
+  | 12274723 | Lejía SAPOLIO Original 770g | 15 | 2.00 | 0.51 | 149 | **149** | `run_20260821_202039` |
+  | 12413532 | GATORADE Maracuyá 600ml | 12 | 1.80 | 0.17 | 163 | **163** | `run_20260822_001329` |
 
-  Los porcentajes salieron **7.34%** y **25.50%**, que son exactamente los dos que este
-  apartado citaba de memoria: el escalón único de §1 se sostiene también donde el descuento
-  es grande. **Umbral 12 sigue sin medirse** — la búsqueda de catálogo para resolver un SKU
-  con ese umbral falló con HTTP 500 y no se insistió. No es urgente: 15 y 24 acotan el rango
-  por arriba y por abajo, así que un fallo exclusivo de 12 sería muy raro.
+  Con los 2, 3 y 4 previos, el escalón único de §1 queda verificado en **2, 3, 4, 12, 15 y
+  24 — el rango completo de umbrales observado en este catálogo**. No es lo mismo que "todos
+  los umbrales posibles": si Makro introduce mañana un umbral de 48, o un segundo escalón, esto
+  no dice nada al respecto. Lo que sí dice es que la fórmula no se rompe al crecer la
+  cantidad, que era la duda concreta.
+
+  Los porcentajes de los dos primeros salieron **7.34%** y **25.50%**, exactamente los dos
+  que este apartado citaba de memoria. El de GATORADE (**9.44%**) llegó además con el
+  descuento declarado como `0.170`: el caso de tres decimales con el tercero en cero que §1
+  da por inofensivo, confirmado acá con centavo exacto (`0.170` → 17 céntimos → 163).
 - **Tasa de llenado** de `base_price`, `postal_resolved`, `neighborhood_resolved` tras 30 días.
 - **Corrección del parseo de presentación** no es verificable: VTEX no publica el contenido
   total de un empaque `measurement_unit = un`. Se mide cobertura, no acierto.
