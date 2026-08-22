@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.21-16"
+VERSION = "2026.08.22-17"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -179,6 +179,44 @@ VERSION = "2026.08.21-16"
 SCHEMA_VERSION = "4"
 
 CAMBIOS = [
+    "17  --categoria: el alcance de la corrida lo decide el usuario, no el"
+    " orden del árbol. No agrega columnas: SCHEMA_VERSION sigue en 4 ·"
+    " (1) el problema: el árbol tiene ~3.400 categorías y descubrir_catalogo"
+    " las recorre en orden fijo cortando al llegar a --catalogo N. Ese orden"
+    " es lo que hace reproducible el descubrimiento, pero significaba que una"
+    " corrida acotada medía SIEMPRE las primeras del árbol (Packs Limpieza,"
+    " Packs Desayunos, Packs Vinos) y abarrotes podía no entrar nunca:"
+    " --catalogo 300 no era '300 SKUs del catálogo' sino 'los primeros 300"
+    " que aparezcan', una muestra sesgada por cómo VTEX ordena su árbol ·"
+    " (2) --categoria '/399/,/77/' acota el universo por match de prefijo"
+    " sobre la ruta completa que aplanar_categorias ya construye. Pedir un"
+    " padre incluye a sus hijos. El match es POR SEGMENTO, no startswith de"
+    " string: pedir 39 no puede arrastrar la 399, que es otra rama ·"
+    " (3) el filtro se aplica ANTES de recorrer, y eso no es una optimización"
+    " sino la diferencia entre que el flag sirva o no: descartar después de"
+    " paginar cuesta una request por categoría tirada, ~83 minutos para nada ·"
+    " (4) acepta la ruta con o sin barras y normaliza. Una ruta que no existe"
+    " en el árbol es CategoriaInexistenteError y exit 2, no un aviso: una"
+    " corrida que mide cero categorías por un typo no puede terminar en 0 con"
+    " un CSV vacío, porque se vería igual que una rama sin stock. Se reportan"
+    " todas las rutas malas juntas, no la primera ·"
+    " (5) --catalogo y --por-categoria siguen operando DENTRO del universo"
+    " acotado; los tres frenos componen. --categoria es incompatible con"
+    " --skus, que ya nombra exactamente qué medir ·"
+    " (6) cambia lo que significa completo=True: pasa a ser 'completo"
+    " respecto de lo pedido'. El manifiesto lo distingue con alcance"
+    " (CATALOGO_COMPLETO / CATEGORIAS_SELECCIONADAS) y con la clasificación"
+    " nueva COMPLETO_EN_CATEGORIAS — llamarlo COMPLETO a secas haría que una"
+    " serie armada sobre una rama se lea después como cobertura total. Con"
+    " --por-categoria el contrato viejo sigue mandando: nunca completo ·"
+    " (7) el manifiesto registra categoria_filtro, categorias_seleccionadas y"
+    " categorias_a_recorrer, sin lo cual no se puede reconstruir el alcance de"
+    " una corrida vieja: dos corridas con el mismo número de SKUs pueden haber"
+    " mirado ramas distintas ·"
+    " (8) antes de recorrer se listan en consola las categorías seleccionadas"
+    " con su ruta y su nombre, y después del descubrimiento se estima el costo"
+    " de la medición — que es la parte cara — para poder abortar mientras"
+    " abortar todavía ahorra algo",
     "16  AUDITORÍA DEL PRECIO MAYORISTA (decisiones_1.1.0 §1/§5/§11). No"
     " agrega columnas: SCHEMA_VERSION sigue en 4 ·"
     " (1) el motor mide a qty=1 SIEMPRE, y a qty=1 el descuento del"
@@ -1378,11 +1416,122 @@ def especificacion(crudo: dict, nombre: str) -> Any:
 ESTADISTICAS_CATALOGO: dict[str, Any] = {}
 
 
+# ===========================================================================
+# FILTRO DE CATEGORÍAS — `--categoria` (1.2.0)
+# ===========================================================================
+#
+# El problema que resuelve
+# ------------------------
+# El árbol de VTEX tiene ~3.400 categorías y `descubrir_catalogo` las recorre
+# en ORDEN FIJO (por ruta), cortando al llegar a `--catalogo N`. Ese orden
+# fijo es lo que hace reproducible el descubrimiento, pero tiene un efecto
+# que nadie eligió: una corrida acotada mide SIEMPRE las primeras categorías
+# del árbol — Packs Limpieza, Packs Desayunos, Packs Vinos — y abarrotes
+# puede no entrar nunca.
+#
+# O sea que hasta 1.1.0 el ALCANCE de la serie lo decidía el orden del árbol,
+# no el analista. `--catalogo 300` no significaba "300 SKUs del catálogo",
+# significaba "los primeros 300 que aparezcan", que es una muestra sesgada
+# por una propiedad accidental de cómo VTEX ordena su árbol.
+#
+# Por qué el filtro va ANTES de recorrer
+# --------------------------------------
+# No es una optimización, es la diferencia entre que el flag sirva o no.
+# Filtrar después de paginar cuesta una request por categoría descartada:
+# 3.300 requests a 1.5s son ~83 minutos para tirar el resultado a la basura.
+# Filtrar antes las salta sin tocarlas.
+
+
+class CategoriaInexistenteError(ValueError):
+    """Una ruta pedida en `--categoria` no existe en el árbol vivo.
+
+    Es un error de ARGUMENTOS, no un aviso. Una corrida que mide cero
+    categorías porque alguien escribió `/3999/` en vez de `/399/` no puede
+    terminar con exit 0 y un CSV vacío: se vería igual que una categoría que
+    de verdad se quedó sin stock.
+    """
+
+
+def normalizar_ruta_categoria(texto: str) -> str:
+    """
+    `/399/`, `399`, ` 399 ` -> `399`. `/399/604/` -> `399/604`.
+
+    `aplanar_categorias` construye las rutas sin barras en los extremos
+    (`1/13/152`), pero el usuario copia el ID del sitio, donde aparece con
+    barras. Aceptar las dos formas cuesta una línea; obligar a una sola
+    convierte un typo en una corrida vacía.
+    """
+
+    return "/".join(p for p in str(texto or "").strip().split("/") if p)
+
+
+def parsear_categorias_pedidas(texto: str) -> list[str]:
+    """Rutas separadas por coma, normalizadas, sin duplicados y en orden."""
+
+    vistas: set[str] = set()
+    rutas: list[str] = []
+
+    for crudo in str(texto or "").split(","):
+        ruta = normalizar_ruta_categoria(crudo)
+
+        if not ruta or ruta in vistas:
+            continue
+
+        vistas.add(ruta)
+        rutas.append(ruta)
+
+    return rutas
+
+
+def ruta_bajo(ruta: str, pedida: str) -> bool:
+    """
+    ¿`ruta` es la categoría pedida o desciende de ella?
+
+    Match de PREFIJO POR SEGMENTO, no de string: `startswith("39")` haría que
+    pedir la categoría 39 arrastrase la 399, que es otra rama entera. Pedir un
+    padre incluye a sus hijos, y eso es lo que se quiere: `--categoria /399/`
+    trae la rama completa sin tener que enumerar cada subcategoría.
+    """
+
+    return ruta == pedida or ruta.startswith(pedida + "/")
+
+
+def filtrar_categorias(
+    categorias: list[dict],
+    pedidas: list[str],
+) -> tuple[list[dict], list[str]]:
+    """
+    Devuelve `(seleccionadas, no_encontradas)`.
+
+    `seleccionadas` sale en el orden en que venía `categorias`, para no tocar
+    el determinismo del recorrido. `no_encontradas` son las rutas pedidas que
+    no matchean NADA del árbol — cada una es un error de argumentos, y se
+    devuelven todas juntas en vez de morir en la primera para que alguien que
+    pidió cuatro rutas y erró dos no tenga que descubrirlo de a una.
+    """
+
+    if not pedidas:
+        return list(categorias), []
+
+    seleccionadas = [
+        c for c in categorias
+        if any(ruta_bajo(c["ruta"], pedida) for pedida in pedidas)
+    ]
+
+    encontradas = {
+        pedida for pedida in pedidas
+        if any(ruta_bajo(c["ruta"], pedida) for c in categorias)
+    }
+
+    return seleccionadas, [p for p in pedidas if p not in encontradas]
+
+
 async def descubrir_catalogo(
     cliente: Cliente,
     limite: int = 0,
     por_categoria: int = 0,
     presupuesto_fase: int = 0,
+    categorias_pedidas: list[str] | None = None,
 ) -> list[Producto]:
     """
     Enumera el catálogo vivo recorriendo el árbol de categorías de VTEX.
@@ -1419,6 +1568,19 @@ async def descubrir_catalogo(
                       "muestra ancha", no "catálogo real" — completo=True
                       bajo ese régimen afirmaría algo que el propio diseño
                       del flag contradice.
+    categorias_pedidas
+                      rutas de categoría (`399`, `399/604`) que acotan el
+                      UNIVERSO a recorrer. Vacío = el árbol entero, como
+                      hasta 1.1.0. `limite` y `por_categoria` siguen
+                      operando DENTRO de ese universo: son tres frenos
+                      independientes y componen.
+
+                      Cambia lo que significa `completo=True`: pasa a ser
+                      "completo respecto de las categorías pedidas", no
+                      "el catálogo entero". El manifiesto lo distingue con
+                      `alcance` y con la clasificación
+                      COMPLETO_EN_CATEGORIAS — llamarlo COMPLETO a secas
+                      afirmaría tener un catálogo que nadie pidió medir.
     presupuesto_fase  tope de requests reservado SOLO para esta fase,
                       subordinado siempre a `cliente.tope` (nunca lo
                       supera: es un freno adicional, más temprano, no un
@@ -1450,12 +1612,44 @@ async def descubrir_catalogo(
 
     categorias = aplanar_categorias(arbol) if status < 400 else []
 
+    pedidas = list(categorias_pedidas or [])
+
+    # EL FILTRO VA ACÁ: antes de decidir niveles y antes de recorrer nada.
+    # Lo que se descarta acá no cuesta una sola request.
+    universo, no_encontradas = filtrar_categorias(categorias, pedidas)
+
+    if no_encontradas:
+        raise CategoriaInexistenteError(
+            "Estas rutas de --categoria no existen en el árbol vivo: "
+            + ", ".join(f"/{r}/" for r in no_encontradas)
+            + f". El árbol tiene {len(categorias)} categorías; revisá el ID "
+            "en el sitio (la ruta va desde la raíz, p. ej. /399/604/)."
+        )
+
     # Nivel 1 es demasiado amplio, nivel 4+ suele tener 2 o 3 productos.
-    utiles = [c for c in categorias if 2 <= c["nivel"] <= 3] or categorias
+    # El `or universo` es el mismo escape que ya existía: si la rama pedida
+    # vive entera fuera de esa franja —una categoría profunda, por ejemplo—
+    # se recorre igual, porque el usuario ya decidió el alcance a mano y la
+    # heurística de niveles existe para cuando NO lo decidió nadie.
+    utiles = [c for c in universo if 2 <= c["nivel"] <= 3] or universo
 
     # Orden fijo: el descubrimiento no puede depender del azar si el
     # motor tiene que ser reproducible sin guardar el resultado.
     utiles.sort(key=lambda c: c["ruta"])
+
+    if pedidas:
+        log("")
+        log(f"  ALCANCE ACOTADO a {len(pedidas)} ruta(s): "
+            + ", ".join(f"/{r}/" for r in pedidas))
+        log(f"  {len(universo)} categorías del árbol caen bajo esas rutas; "
+            f"se recorren {len(utiles)} (nivel 2-3). "
+            f"Se saltan {len(categorias) - len(universo)} sin gastar requests.")
+        log("")
+
+        for c in utiles:
+            log(f"    /{c['ruta']}/  {c['name'][:52]}")
+
+        log("")
 
     log(
         f"  Categorías a recorrer: {len(utiles)} | "
@@ -1469,7 +1663,14 @@ async def descubrir_catalogo(
     stats: dict[str, Any] = {
         "limite": limite,
         "por_categoria": por_categoria,
+        # Alcance de la corrida (1.2.0). Sin esto no se puede reconstruir
+        # después qué universo miró una corrida vieja: dos corridas con el
+        # mismo número de SKUs pueden haber mirado ramas distintas del árbol.
+        "categoria_filtro": list(pedidas),
+        "alcance": "CATEGORIAS_SELECCIONADAS" if pedidas else "CATALOGO_COMPLETO",
         "categorias_en_arbol": len(categorias),
+        "categorias_seleccionadas": len(universo),
+        "categorias_a_recorrer": len(utiles),
         "categorias_consultadas": 0,
         "categorias_productivas": 0,
         "categorias_vacias": 0,
@@ -1809,6 +2010,12 @@ async def descubrir_catalogo(
     # o un analista no tengan que interpretar una lista de strings libres:
     #
     #   COMPLETO                   se recorrió el árbol entero sin cortes.
+    #   COMPLETO_EN_CATEGORIAS     se recorrió sin cortes TODO lo que
+    #                              --categoria pedía, que no es el catálogo.
+    #                              Vale como "no falta nada de lo pedido" y
+    #                              NO vale como "este es el catálogo Makro":
+    #                              confundirlos haría que una serie armada
+    #                              sobre una rama se lea como cobertura total.
     #   LIMITADO_DELIBERADAMENTE   se cortó por una decisión consciente
     #                              (del usuario vía --catalogo/--por-
     #                              categoria, o del propio motor protegiendo
@@ -1827,7 +2034,9 @@ async def descubrir_catalogo(
     motivos_set = set(stats["motivos_incompleto"])
 
     if not motivos_set:
-        stats["clasificacion"] = "COMPLETO"
+        stats["clasificacion"] = (
+            "COMPLETO_EN_CATEGORIAS" if pedidas else "COMPLETO"
+        )
     elif motivos_set & MOTIVOS_NO_PLANEADOS:
         stats["clasificacion"] = "INCOMPLETO_NO_PLANEADO"
     elif motivos_set & MOTIVOS_DELIBERADOS:
@@ -1851,6 +2060,16 @@ async def descubrir_catalogo(
                 "descubrir un solo producto. No es un problema de red: "
                 "subí --tope o bajá --intervalo si el presupuesto es "
                 "insuficiente incluso para el árbol de categorías."
+            )
+
+        if pedidas:
+            raise RuntimeError(
+                "Las categorías pedidas existen en el árbol pero no "
+                "devolvieron ningún producto bajo sc="
+                f"{SALES_CHANNEL}: {', '.join('/' + r + '/' for r in pedidas)}. "
+                "El árbol de VTEX tiene ~78% de categorías vacías, así que "
+                "una rama entera sin stock es posible — pero revisá el ID "
+                "antes de asumirlo."
             )
 
         raise RuntimeError(
@@ -4678,6 +4897,18 @@ def parsear_argumentos() -> argparse.Namespace:
                             "por corrida. Default: <repo>/data/" + MOTOR + "/"
                         ))
 
+    parser.add_argument("--categoria", default="",
+                        help=(
+                            "Rutas de categoría separadas por coma que acotan "
+                            "el universo a recorrer: '/399/,/77/' o '399,77'. "
+                            "Pedir un padre incluye a sus hijos. El filtro se "
+                            "aplica ANTES de recorrer, así que las categorías "
+                            "descartadas no cuestan requests. --catalogo y "
+                            "--por-categoria siguen operando dentro de este "
+                            "universo. Una ruta que no exista en el árbol es "
+                            "un error, no un aviso. Vacío = árbol completo."
+                        ))
+
     parser.add_argument("--skus", default="",
                         help=(
                             "Lista explícita de sku_id (comas o espacios). "
@@ -4797,6 +5028,18 @@ def parsear_argumentos() -> argparse.Namespace:
     argumentos = parser.parse_args()
 
     argumentos.skus = parsear_lista_skus(argumentos.skus)
+    argumentos.categoria = parsear_categorias_pedidas(argumentos.categoria)
+
+    # La existencia de cada ruta NO se puede validar acá: hace falta el árbol
+    # vivo, y eso es una request. Se valida en `descubrir_catalogo`, que ya lo
+    # tiene, y el error sale con el mismo exit 2 que usa argparse para un uso
+    # incorrecto — es lo que es.
+    if argumentos.categoria and argumentos.skus:
+        parser.error(
+            "--categoria y --skus son incompatibles: --skus ya nombra "
+            "exactamente qué medir, así que acotar el universo no cambia "
+            "nada y sugeriría un filtro que no se aplicó."
+        )
 
     if argumentos.skus:
         # O lista explícita, o descubrimiento. Las dos juntas dejarían la
@@ -4953,6 +5196,12 @@ async def main() -> int:
             else f"descubrimiento cortado en {argumentos.catalogo} SKUs"
             if argumentos.catalogo
             else "completo (se recorre todo el árbol)"
+        )
+        + (
+            "  ·  ACOTADO a "
+            + ", ".join(f"/{r}/" for r in argumentos.categoria)
+            if argumentos.categoria
+            else ""
         )
         + (
             f" · máx {argumentos.por_categoria} por subcategoría"
@@ -5140,12 +5389,24 @@ async def main() -> int:
                         "requests totales."
                     )
 
-                catalogo = await descubrir_catalogo(
-                    cliente,
-                    limite=argumentos.catalogo,
-                    por_categoria=argumentos.por_categoria,
-                    presupuesto_fase=presupuesto_descubrimiento,
-                )
+                try:
+                    catalogo = await descubrir_catalogo(
+                        cliente,
+                        limite=argumentos.catalogo,
+                        por_categoria=argumentos.por_categoria,
+                        presupuesto_fase=presupuesto_descubrimiento,
+                        categorias_pedidas=argumentos.categoria,
+                    )
+                except CategoriaInexistenteError as exc:
+                    # Error de ARGUMENTOS, detectable solo con el árbol vivo
+                    # en la mano. Mismo exit 2 que argparse usa para un uso
+                    # incorrecto: la corrida no empezó, y no debe parecer que
+                    # midió cero por falta de stock.
+                    log("")
+                    log("!" * 110)
+                    log(f"ARGUMENTO INVÁLIDO: {exc}")
+                    log("!" * 110)
+                    return 2
 
                 # ---------------- SELECCIÓN ----------------
                 seleccion = seleccionar(
@@ -5189,6 +5450,28 @@ async def main() -> int:
                 log(f"{i:03d}. SKU {producto.sku_id:<10} {producto.product_name[:60]}")
 
             total = len(seleccion) * len(NODOS)
+
+            # Estimación de costo, antes de gastar la parte cara. Descubrir
+            # cuesta ~1 request por categoría; MEDIR cuesta SKUs × nodos (y
+            # hasta ×4 con fallback y reintentos). Este es el último punto
+            # donde abortar todavía ahorra algo, así que el número va acá y
+            # no al final, donde ya sería una autopsia.
+            segundos = total * argumentos.intervalo
+
+            log("")
+            log(
+                f"COSTO ESTIMADO DE LA MEDICIÓN: {len(seleccion)} SKUs × "
+                f"{len(NODOS)} nodos = {total} mediciones "
+                f"(~{total}-{total * 4} requests, ~{segundos / 60:.0f}-"
+                f"{segundos * 4 / 60:.0f} min a {argumentos.intervalo}s)"
+            )
+
+            if argumentos.categoria:
+                log(
+                    "Alcance: solo "
+                    + ", ".join(f"/{r}/" for r in argumentos.categoria)
+                    + " — NO es el catálogo completo."
+                )
 
             # Tope automático.
             #

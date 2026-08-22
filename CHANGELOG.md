@@ -7,6 +7,37 @@ y el versionado sigue [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
+## [1.2.0] - 2026-08-22
+
+### Added
+- **`--categoria "/399/,/77/"`**: acota el universo del descubrimiento a una o varias ramas del
+  árbol. Hasta 1.1.0 el alcance de una corrida lo decidía el orden del árbol y no el analista:
+  `descubrir_catalogo` recorre las ~3.400 categorías en orden fijo y corta al llegar a
+  `--catalogo N`, así que una corrida acotada medía siempre las primeras (Packs Limpieza, Packs
+  Desayunos, Packs Vinos) y abarrotes podía no entrar nunca
+- El filtro es un match de prefijo **por segmento** sobre la ruta completa desde la raíz, así que
+  pedir un padre incluye a sus hijos y pedir `/39/` no arrastra `/399/`. Acepta la ruta con o sin
+  barras
+- Se aplica **antes** de recorrer: las categorías descartadas no cuestan requests. Medido sobre
+  `/399/` (Limpieza): 47 categorías recorridas, 3.353 saltadas sin una sola request
+- Una ruta que no existe en el árbol es un error de argumentos (exit 2), no un aviso — una corrida
+  que mide cero categorías por un typo no puede terminar en 0 con un CSV vacío. Se reportan todas
+  las rutas inválidas juntas
+- Antes de recorrer se listan en consola las categorías seleccionadas con su ruta y su nombre, y
+  tras el descubrimiento se estima el costo de la medición, para poder abortar mientras abortar
+  todavía ahorra algo
+- El manifiesto registra `categoria_filtro`, `alcance`, `categorias_seleccionadas` y
+  `categorias_a_recorrer`: sin eso no se puede reconstruir el alcance de una corrida vieja, porque
+  dos corridas con el mismo número de SKUs pueden haber mirado ramas distintas
+
+### Changed
+- `completo=True` en el descubrimiento pasa a significar "completo respecto de lo pedido" cuando
+  hay `--categoria`. Se distingue con la clasificación nueva **`COMPLETO_EN_CATEGORIAS`**:
+  llamarlo `COMPLETO` a secas haría que una serie armada sobre una rama se lea después como
+  cobertura del catálogo. Con `--por-categoria` sigue mandando el contrato viejo: nunca completo
+- `--categoria` es incompatible con `--skus`, que ya nombra exactamente qué medir
+- `pyproject.toml` sube a 1.2.0 (venía declarando 1.0.0 desde antes de 1.1.0)
+
 ## [1.1.0] - 2026-08-22
 
 ### Added
@@ -75,7 +106,6 @@ y el versionado sigue [Semantic Versioning](https://semver.org/lang/es/).
 Del inventario de bugs de §9 quedan sin corregir, y no bloquean la versión:
 - Sondas v1/v4: `MOTOR_PY` sigue apuntando a `engines/mk_scraping_engine_0.1.0.py`, ruta que no
   existe. Sonda v3: `V1_PY` sigue buscando `v1.py`. Las sondas **no** se renombraron con ordinal
-- `pyproject.toml` declara `version = "1.0.0"`: no se subió a 1.1.0
 - El docstring del módulo todavía muestra un ejemplo con `extractor_makro_v11.py --reiniciar`
 - `precio_mayorista_verificado` solo puede decir `SI` en el nodo auditado: la auditoría corre contra
   un solo nodo, así que "umbral y descuento aplican igual en todas las sucursales" sigue asumido (§11)
