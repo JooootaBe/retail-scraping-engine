@@ -389,9 +389,22 @@ evidencia de qué medía el motor antes de estos cambios y no se reemplaza para 
 
 ## 11. Verificaciones pendientes — no bloquean 1.1.0
 
-- **Auditoría de la fórmula en umbral alto.** Solo se probó en umbrales 2, 3 y 4. Los altos
-  (12, 15, 24) son donde están los descuentos grandes: MONSTER 7.34%, Lejía SAPOLIO 770g
-  25.5%. Un request lo cierra.
+- **Auditoría de la fórmula en umbral alto — VERIFICADA en 15 y 24; queda 12.**
+  La fórmula de §1 se probó originalmente solo en umbrales 2, 3 y 4, y los altos son donde
+  están los descuentos grandes. El motor ya tiene la fase que lo cierra
+  (`--auditoria-mayorista`, remide a `qty = bi_umbral`), y el 21-ago-2026 dio **exacto al
+  centavo en los dos umbrales altos medidos** (corrida `run_20260821_202039`):
+
+  | SKU | Producto | Umbral | Unitario | Descuento | Reconstruido | **Medido** |
+  |---|---|---|---|---|---|---|
+  | 49311 | MONSTER Ultra Lata 473ml | 24 | 7.90 | 0.58 | 732 | **732** |
+  | 12274723 | Lejía SAPOLIO Original 770g | 15 | 2.00 | 0.51 | 149 | **149** |
+
+  Los porcentajes salieron **7.34%** y **25.50%**, que son exactamente los dos que este
+  apartado citaba de memoria: el escalón único de §1 se sostiene también donde el descuento
+  es grande. **Umbral 12 sigue sin medirse** — la búsqueda de catálogo para resolver un SKU
+  con ese umbral falló con HTTP 500 y no se insistió. No es urgente: 15 y 24 acotan el rango
+  por arriba y por abajo, así que un fallo exclusivo de 12 sería muy raro.
 - **Tasa de llenado** de `base_price`, `postal_resolved`, `neighborhood_resolved` tras 30 días.
 - **Corrección del parseo de presentación** no es verificable: VTEX no publica el contenido
   total de un empaque `measurement_unit = un`. Se mide cobertura, no acierto.

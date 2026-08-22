@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.21-15"
+VERSION = "2026.08.21-16"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -179,6 +179,43 @@ VERSION = "2026.08.21-15"
 SCHEMA_VERSION = "4"
 
 CAMBIOS = [
+    "16  AUDITORÍA DEL PRECIO MAYORISTA (decisiones_1.1.0 §1/§5/§11). No"
+    " agrega columnas: SCHEMA_VERSION sigue en 4 ·"
+    " (1) el motor mide a qty=1 SIEMPRE, y a qty=1 el descuento del"
+    " bi-precio no se aplica, así que hasta v15 precio_mayorista era una"
+    " RESTA de dos números del catálogo hecha con confianza y"
+    " precio_mayorista_verificado no podía decir otra cosa que NO en todas"
+    " las filas. Fase nueva --auditoria-mayorista N (default 3, 0 la apaga):"
+    " remide N SKUs COMPLETO a qty=bi_umbral y contrasta medido contra"
+    " reconstruido ·"
+    " (2) las filas auditadas pasan a precio_mayorista_verificado=SI con el"
+    " precio MEDIDO, y descuento_mayorista_pct y"
+    " precio_mayorista_por_unidad_base se recalculan contra lo realmente"
+    " cobrado para que precio y porcentaje no se contradigan dentro de la"
+    " misma fila ·"
+    " (3) si el medido NO coincide con el reconstruido gana el medido —es lo"
+    " que el cliente paga— y la fila sale marcada DQ_MAYORISTA_DISCREPA."
+    " descuento_monto NO se toca: sigue siendo lo que VTEX declaró, y que lo"
+    " declarado y lo cobrado no cierren ES el hallazgo. Grita en consola y"
+    " queda en el manifiesto: una discrepancia invalida la fórmula para ese"
+    " umbral y pone en duda el resto de la columna, que sigue reconstruida ·"
+    " (4) la selección NO usa el hash de seleccionar(): busca cubrir el RANGO"
+    " DE UMBRALES, no una muestra representativa. Uno bajo (2-3), el más alto"
+    " disponible (12-24), y el resto prefiriendo umbrales no cubiertos. Tres"
+    " auditorías del mismo umbral prueban la mitad de lo que esta fase tiene"
+    " que decir y dejan intacto el hueco de §11. El desempate es"
+    " (bi_umbral, sku_id): determinista, así que dos corridas con las mismas"
+    " filas COMPLETO auditan los mismos SKUs y son comparables entre días ·"
+    " (5) consultar_simulation acepta `cantidad` (default 1): es el único"
+    " lugar del motor que la sube ·"
+    " (6) presupuesto agotado durante la auditoría corta la fase y conserva"
+    " todo lo medido — las filas se quedan con el mayorista reconstruido,"
+    " que es un dato honesto. Una corrida no puede morir por auditar ·"
+    " (7) el manifiesto gana auditoria_mayorista{solicitadas, realizadas,"
+    " coinciden, discrepan, fallidas, node_id, umbrales_auditados, detalle} y"
+    " el RESUMEN avisa explícitamente cuando ningún umbral alto entró en la"
+    " muestra: la fórmula sigue sin probarse donde están los descuentos"
+    " grandes",
     "15  BLOQUE B de 1.1.0 (decisiones_1.1.0.md §1/§5/§6): las 22 columnas"
     " del precio mayorista. SCHEMA_VERSION sube 3 -> 4 — 56 columnas pasan a"
     " 78, el mismo header que golden_v5.csv ·"
@@ -2186,6 +2223,29 @@ AUDITORIA: dict[str, Any] = {
     "detalle": [],
 }
 
+# Resultado de la auditoría del PRECIO MAYORISTA (1.1.0).
+#
+# Es otra pregunta que la auditoría simulation-vs-orderForm, aunque el patrón
+# sea el mismo (muestrear, contrastar, registrar). Aquella pregunta "¿la vía
+# barata dice lo mismo que la cara?". Esta pregunta "¿la FÓRMULA de §1
+# reconstruye el precio que el cliente pagaría de verdad?" — y solo se puede
+# responder pidiendo `qty = bi_umbral`, porque a qty=1 el descuento no se
+# aplica.
+#
+# Sin esta fase, `precio_mayorista_cents` es una resta de dos números del
+# catálogo hecha con confianza, y `precio_mayorista_verificado` no puede
+# decir otra cosa que `NO` en todas las filas.
+AUDITORIA_MAYORISTA: dict[str, Any] = {
+    "solicitadas": 0,
+    "realizadas": 0,
+    "coinciden": 0,
+    "discrepan": 0,
+    "fallidas": 0,
+    "node_id": "",
+    "umbrales_auditados": [],
+    "detalle": [],
+}
+
 # Avisos que hasta v11 solo existían en la consola de una corrida que
 # nadie estaba mirando (bug confirmado en v11, revisión de Codex, 13-ago:
 # el aviso de CSV viejos en la carpeta raíz, migración de salida). Una
@@ -3413,6 +3473,7 @@ async def consultar_simulation(
     cliente: Cliente,
     producto: Producto,
     nodo: Nodo,
+    cantidad: int = 1,
 ) -> tuple[int, Any]:
     """
     Una sola request devuelve precio + logística.
@@ -3420,13 +3481,19 @@ async def consultar_simulation(
     La simulación NO guarda estado en el contexto: la geolocalización va
     en el body de cada llamada. Por eso el contexto del navegador se
     puede reutilizar sin riesgo de contaminación entre mediciones.
+
+    `cantidad` es 1 en toda la medición normal, y es lo que hace que el
+    motor RECONSTRUYA el precio mayorista en vez de observarlo (§1: a qty=1
+    el descuento no se aplica y `priceTags` viene vacío). La auditoría del
+    mayorista es el único lugar que la sube, a `qty = bi_umbral`, para ver
+    el precio que el cliente pagaría de verdad.
     """
 
     cuerpo = {
         "items": [
             {
                 "id": int(producto.sku_id),
-                "quantity": 1,
+                "quantity": max(1, int(cantidad)),
                 "seller": producto.seller_id or "1",
             }
         ],
@@ -4254,6 +4321,198 @@ def registrar_corrida(resumen: dict[str, Any]) -> None:
         archivo.write(json.dumps(indice, ensure_ascii=False) + "\n")
 
 
+# ===========================================================================
+# AUDITORÍA DEL PRECIO MAYORISTA (decisiones_1.1.0 §1, §5, §11)
+# ===========================================================================
+#
+# La fórmula `precio_mayorista = price − descuento` está verificada al
+# centavo en 5 SKUs (§1), pero SOLO en umbrales 2, 3 y 4. Los altos —12, 15,
+# 24— son justo donde viven los descuentos grandes (hasta 25.5%), y son los
+# que más caro salen si VTEX aplica ahí otra regla: otro escalón, otro
+# redondeo, un tope. §11 lo deja anotado como verificación pendiente.
+#
+# Esta fase la cierra de la única forma posible: pidiendo `qty = bi_umbral` y
+# mirando qué precio devuelve VTEX. Todo lo demás son dos números del
+# catálogo restados con confianza.
+
+
+def elegir_auditables_mayorista(
+    filas: list[Fila],
+    node_id: str,
+    cuantos: int,
+) -> list[Fila]:
+    """
+    Elige qué filas remedir a `qty = bi_umbral`. Determinista y sin `random`.
+
+    El criterio NO es el hash que usa `seleccionar()` para la muestra, y la
+    diferencia es deliberada: acá no se busca una muestra REPRESENTATIVA, se
+    busca cubrir el RANGO DE UMBRALES. Tres auditorías del mismo umbral
+    prueban que la fórmula funciona para ese umbral, que es la mitad de lo
+    que esta fase tiene que decir — y deja intacto el hueco de §11.
+
+    Orden de prioridad:
+
+    1. Un umbral BAJO (2-3), que es el caso ya verificado: si este falla, el
+       problema no está en la escala sino en la fórmula.
+    2. Un umbral ALTO (12-24), el hueco de §11. Se toma el MÁS alto
+       disponible: es donde más lejos está la extrapolación.
+    3. El resto, prefiriendo umbrales todavía no cubiertos.
+
+    Determinismo: el desempate es `(bi_umbral, sku_id)`, así que dos corridas
+    con las mismas filas COMPLETO auditan exactamente los mismos SKUs. Eso es
+    lo que hace comparables dos auditorías de días distintos — y lo que hace
+    que este motor reproduzca la elección de la sonda que generó el golden.
+    """
+
+    disponibles = [
+        f for f in filas
+        if f.node_id == node_id
+        and f.biprecio_status == "COMPLETO"
+        and entero(f.bi_umbral)
+    ]
+
+    if not disponibles or cuantos <= 0:
+        return []
+
+    por_umbral = sorted(disponibles, key=lambda f: (entero(f.bi_umbral), f.sku_id))
+
+    elegidos: list[Fila] = []
+
+    bajos = [f for f in por_umbral if 2 <= entero(f.bi_umbral) <= 3]
+    altos = [f for f in por_umbral if 12 <= entero(f.bi_umbral) <= 24]
+
+    if bajos:
+        elegidos.append(bajos[0])
+
+    if altos and altos[-1] not in elegidos:
+        elegidos.append(altos[-1])
+
+    # Si el rango pedido no existe en la muestra, se completa con los
+    # extremos disponibles, prefiriendo umbrales todavía no cubiertos.
+    cubiertos = {entero(f.bi_umbral) for f in elegidos}
+
+    for preferir_nuevo in (True, False):
+        for candidato in [por_umbral[-1], por_umbral[0]] + por_umbral:
+            if len(elegidos) >= cuantos:
+                break
+
+            if candidato in elegidos:
+                continue
+
+            umbral = entero(candidato.bi_umbral)
+
+            if preferir_nuevo and umbral in cubiertos:
+                continue
+
+            elegidos.append(candidato)
+            cubiertos.add(umbral)
+
+    return elegidos[:cuantos]
+
+
+async def auditar_mayorista(
+    cliente: Cliente,
+    fila: Fila,
+    producto: Producto,
+    nodo: Nodo,
+) -> dict[str, Any]:
+    """
+    Remide el MISMO SKU a `qty = bi_umbral` y contrasta contra lo reconstruido.
+
+    Si coinciden, la fila pasa a `precio_mayorista_verificado = SI` y el
+    número deja de ser una resta para pasar a ser una observación.
+
+    Si NO coinciden, gana el MEDIDO —es lo que el cliente pagaría— y la fila
+    sale marcada `DQ_MAYORISTA_DISCREPA`. `descuento_monto` NO se toca: sigue
+    siendo lo que VTEX declaró, y justamente que lo declarado y lo cobrado no
+    cierren es el hallazgo. Una discrepancia acá invalida la fórmula de §1
+    para ese umbral, que es de las cosas más caras que pueden pasarle a este
+    dataset: se registra en la fila, en el manifiesto y a gritos en consola.
+
+    Nunca lanza salvo `TopeAgotadoError`, que es condición de corrida.
+    """
+
+    umbral = entero(fila.bi_umbral)
+    reconstruido = entero(fila.precio_mayorista_cents)
+
+    resultado: dict[str, Any] = {
+        "sku_id": fila.sku_id,
+        "node_id": nodo.node_id,
+        "producto": fila.product_name,
+        "umbral": umbral,
+        "unitario_cents": entero(fila.price_cents),
+        "reconstruido_cents": reconstruido,
+        "medido_cents": None,
+        "veredicto": "",
+        "detalle": "",
+    }
+
+    try:
+        status, datos = await consultar_simulation(cliente, producto, nodo, umbral)
+    except TopeAgotadoError:
+        # Igual que en el resto del motor: el presupuesto agotado es un
+        # estado de la CORRIDA. Se propaga para que main() lo trate como tal.
+        raise
+    except Exception as exc:
+        resultado["veredicto"] = "AUDITORIA_FALLIDA"
+        resultado["detalle"] = f"{type(exc).__name__}: {exc}"[:200]
+        return resultado
+
+    guardar_evidencia(producto, nodo, f"simulation_qty{umbral}", status, datos)
+
+    if status >= 400:
+        resultado["veredicto"] = "AUDITORIA_FALLIDA"
+        resultado["detalle"] = f"HTTP {status}"
+        return resultado
+
+    item = extraer_item(datos, producto)
+    medido = entero(item.get("sellingPrice"))
+
+    resultado["medido_cents"] = medido
+
+    if medido is None:
+        resultado["veredicto"] = "AUDITORIA_FALLIDA"
+        resultado["detalle"] = "simulation no devolvió sellingPrice"
+        return resultado
+
+    # El precio medido es el HECHO. Se escribe siempre, coincida o no.
+    fila.precio_mayorista_verificado = "SI"
+    fila.precio_mayorista_cents = str(medido)
+    fila.precio_mayorista = money(Decimal(medido) / 100)
+
+    unitario = entero(fila.price_cents)
+
+    if unitario:
+        # El porcentaje se recalcula contra el precio REALMENTE cobrado, para
+        # que precio y porcentaje no se contradigan dentro de la misma fila.
+        fila.descuento_mayorista_pct = (
+            f"{(Decimal(unitario - medido) / Decimal(unitario) * 100).quantize(CENTAVO)}"
+        )
+
+    cantidad = dec(fila.cantidad_base)
+
+    if cantidad and cantidad > CERO:
+        fila.precio_mayorista_por_unidad_base = money4(
+            Decimal(medido) / 100 / cantidad
+        )
+
+    if medido == reconstruido:
+        resultado["veredicto"] = "COINCIDE"
+        return resultado
+
+    resultado["veredicto"] = "DISCREPA"
+    resultado["detalle"] = (
+        f"medido {medido} vs reconstruido {reconstruido} "
+        f"({medido - (reconstruido or 0):+d} céntimos)"
+    )
+
+    fila.dq_flags = "|".join(
+        [f for f in (fila.dq_flags, "DQ_MAYORISTA_DISCREPA") if f]
+    )
+
+    return resultado
+
+
 def evaluar_corrida(resumen: dict[str, Any]) -> tuple[bool, list[str], int]:
     """
     Decide si la corrida se presenta como completa y qué exit code le
@@ -4337,6 +4596,9 @@ def escribir_manifiesto(
         "descubrimiento": dict(ESTADISTICAS_CATALOGO),
         "seleccion": dict(SELECCION),
         "auditoria": {k: v for k, v in AUDITORIA.items()},
+        # Otra pregunta que `auditoria` (simulation vs orderForm): esta dice
+        # si la FÓRMULA del mayorista reconstruye lo que el cliente paga.
+        "auditoria_mayorista": {k: v for k, v in AUDITORIA_MAYORISTA.items()},
         # v13: estado explícito de fases que hasta v12 solo se podían
         # inferir leyendo filas EXCEPTION/NO_PRICE en el CSV. Ver
         # TopeAgotadoError, MEDICION y STOCK_CADENA_ESTADO.
@@ -4439,6 +4701,19 @@ def parsear_argumentos() -> argparse.Namespace:
                             "%% de mediciones que se contrastan simulation vs "
                             "orderForm para detectar discrepancias. 0 = "
                             "desactivada. Default: 5"
+                        ))
+
+    parser.add_argument("--auditoria-mayorista", type=int, default=3,
+                        dest="auditoria_mayorista",
+                        help=(
+                            "Cuántos SKUs con bi-precio se remiden a "
+                            "qty=bi_umbral para comprobar que la fórmula "
+                            "price - descuento da el precio que el cliente "
+                            "paga de verdad. Cuesta 1 request por SKU, fijo: "
+                            "no crece con el catálogo. La selección prioriza "
+                            "cubrir umbrales DISTINTOS (uno bajo, el más alto "
+                            "disponible) antes que repetir el mismo. "
+                            "0 = desactivada. Default: 3"
                         ))
 
     parser.add_argument("--sin-evidencia", action="store_true",
@@ -4603,6 +4878,19 @@ async def main() -> int:
     STOCK_CADENA_ESTADO.clear()
     STOCK_CADENA_ESTADO.update({"completo": True, "motivo": ""})
     ALARMA_FIRMA_DISPARADA.clear()
+    AUDITORIA_MAYORISTA.clear()
+    AUDITORIA_MAYORISTA.update(
+        {
+            "solicitadas": 0,
+            "realizadas": 0,
+            "coinciden": 0,
+            "discrepan": 0,
+            "fallidas": 0,
+            "node_id": "",
+            "umbrales_auditados": [],
+            "detalle": [],
+        }
+    )
 
     if argumentos.salida:
         SALIDA = Path(argumentos.salida).expanduser().resolve()
@@ -4686,6 +4974,14 @@ async def main() -> int:
         "contrastadas simulation vs orderForm"
         if argumentos.auditoria > 0
         else "Auditoría  : desactivada"
+    )
+    log(
+        "Mayorista  : "
+        + (
+            f"{argumentos.auditoria_mayorista} SKUs remedidos a qty=bi_umbral"
+            if argumentos.auditoria_mayorista > 0
+            else "auditoría desactivada (el mayorista queda reconstruido)"
+        )
     )
     log(
         f"Evidencia  : {'no se guarda' if argumentos.sin_evidencia else 'raw/ (JSONL comprimido)'}"
@@ -5118,6 +5414,106 @@ async def main() -> int:
             if pendientes:
                 MEDICION["motivo"] = "REQUEST_BUDGET_EXHAUSTED"
 
+            # ---------------- AUDITORÍA DEL MAYORISTA ----------------
+            #
+            # Va DESPUÉS de la medición porque necesita las filas ya
+            # construidas: se auditan las que salieron COMPLETO, y eso no se
+            # sabe hasta haberlas medido. Y va ANTES de la salida porque
+            # MUTA esas filas — el precio medido reemplaza al reconstruido.
+            #
+            # Se salta entera si no queda presupuesto: una fila con el
+            # mayorista reconstruido y `verificado = NO` es un dato honesto;
+            # una corrida que muere por auditar no lo es.
+            if argumentos.auditoria_mayorista > 0 and not presupuesto_agotado_global:
+                cliente.fase = "auditoria_mayorista"
+
+                nodo_auditoria = next(iter(NODOS.values()))
+
+                auditables = elegir_auditables_mayorista(
+                    filas, nodo_auditoria.node_id, argumentos.auditoria_mayorista
+                )
+
+                AUDITORIA_MAYORISTA["node_id"] = nodo_auditoria.node_id
+                AUDITORIA_MAYORISTA["solicitadas"] = len(auditables)
+
+                if not auditables:
+                    log("")
+                    log(
+                        "Auditoría del mayorista: ninguna fila salió "
+                        f"biprecio_status=COMPLETO en el nodo "
+                        f"{nodo_auditoria.node_id} — no hay nada que auditar."
+                    )
+                else:
+                    log("")
+                    log("AUDITORÍA DEL PRECIO MAYORISTA")
+                    log("-" * 110)
+                    log(
+                        f"{len(auditables)} SKUs remedidos a qty=bi_umbral "
+                        f"contra el nodo {nodo_auditoria.node_id} "
+                        f"({nodo_auditoria.branch}) — es la única prueba de "
+                        "que la fórmula de §1 reconstruye lo que el cliente "
+                        "pagaría."
+                    )
+
+                # `medir()` recibe el Producto; acá las filas ya no lo
+                # tienen, así que se busca por sku_id sobre la selección de
+                # esta misma corrida.
+                por_sku = {p.sku_id: p for p in seleccion}
+
+                for fila_auditada in auditables:
+                    producto = por_sku.get(fila_auditada.sku_id)
+
+                    if producto is None:
+                        continue
+
+                    try:
+                        resultado = await auditar_mayorista(
+                            cliente, fila_auditada, producto, nodo_auditoria
+                        )
+                    except TopeAgotadoError as exc:
+                        # Mismo trato que las otras fases: es condición de
+                        # CORRIDA. Se corta la auditoría, se conserva todo lo
+                        # medido, y queda constancia. No degrada la medición:
+                        # las filas ya tienen su mayorista reconstruido.
+                        log(
+                            f"AVISO: presupuesto agotado durante la auditoría "
+                            f"del mayorista ({exc}). Se detiene aquí; las "
+                            "filas conservan el mayorista reconstruido."
+                        )
+                        AVISOS.append(
+                            "Presupuesto agotado durante auditoria_mayorista: "
+                            f"{AUDITORIA_MAYORISTA['realizadas']} de "
+                            f"{len(auditables)} auditorías completadas."
+                        )
+                        break
+
+                    AUDITORIA_MAYORISTA["detalle"].append(resultado)
+
+                    if resultado["veredicto"] == "AUDITORIA_FALLIDA":
+                        AUDITORIA_MAYORISTA["fallidas"] += 1
+                    else:
+                        AUDITORIA_MAYORISTA["realizadas"] += 1
+                        AUDITORIA_MAYORISTA["umbrales_auditados"].append(
+                            resultado["umbral"]
+                        )
+
+                        if resultado["veredicto"] == "COINCIDE":
+                            AUDITORIA_MAYORISTA["coinciden"] += 1
+                        else:
+                            AUDITORIA_MAYORISTA["discrepan"] += 1
+
+                    log(
+                        f"  {resultado['sku_id']:>9} qty={resultado['umbral']:<3} "
+                        f"{(resultado['producto'] or '')[:34]:<36} "
+                        f"reconstruido={resultado['reconstruido_cents']} "
+                        f"medido={resultado['medido_cents']} "
+                        f"{resultado['veredicto']} {resultado['detalle']}"
+                    )
+
+                AUDITORIA_MAYORISTA["umbrales_auditados"] = sorted(
+                    set(AUDITORIA_MAYORISTA["umbrales_auditados"])
+                )
+
             await contexto.close()
 
         finally:
@@ -5231,6 +5627,69 @@ async def main() -> int:
             log(
                 f"                   {AUDITORIA['fallidas']} auditorías no se "
                 "pudieron completar (la medición principal sí)"
+            )
+
+    # ---- AUDITORÍA DEL MAYORISTA ----
+    #
+    # Mismo principio que el bloque de arriba: una auditoría que no reporta no
+    # cumple su función. Si la fórmula de §1 empieza a fallar, el dataset
+    # entero de precios mayoristas queda en duda, y eso no puede enterarse
+    # solo quien abra el CSV a mirar una columna que no sabe que existe.
+    if AUDITORIA_MAYORISTA["solicitadas"]:
+        umbrales = AUDITORIA_MAYORISTA["umbrales_auditados"]
+
+        log("")
+        log(
+            f"Mayorista        : {AUDITORIA_MAYORISTA['realizadas']}/"
+            f"{AUDITORIA_MAYORISTA['solicitadas']} SKUs remedidos a "
+            f"qty=bi_umbral contra el nodo {AUDITORIA_MAYORISTA['node_id']}"
+        )
+
+        if umbrales:
+            log(
+                f"                   umbrales auditados: "
+                + ", ".join(str(u) for u in umbrales)
+                + (
+                    "  (ninguno alto: la fórmula sigue sin probarse en 12/15/24)"
+                    if umbrales and max(umbrales) < 12
+                    else ""
+                )
+            )
+
+        if AUDITORIA_MAYORISTA["discrepan"] == 0 and AUDITORIA_MAYORISTA["realizadas"]:
+            log(
+                f"                   COINCIDEN — el precio medido a qty=umbral "
+                f"es exacto al reconstruido en "
+                f"{AUDITORIA_MAYORISTA['coinciden']}/"
+                f"{AUDITORIA_MAYORISTA['realizadas']}"
+            )
+        elif AUDITORIA_MAYORISTA["discrepan"]:
+            log("")
+            log("!" * 110)
+            log(
+                f"LA FÓRMULA DEL MAYORISTA FALLÓ EN "
+                f"{AUDITORIA_MAYORISTA['discrepan']} DE "
+                f"{AUDITORIA_MAYORISTA['realizadas']} AUDITORÍAS."
+            )
+            log("precio_mayorista = price - descuento NO reprodujo lo que VTEX")
+            log("cobra a qty=umbral. Las filas afectadas llevan el precio MEDIDO")
+            log("y la marca DQ_MAYORISTA_DISCREPA, pero el resto del dataset")
+            log("sigue reconstruido con una fórmula que acaba de fallar: revisa")
+            log("manifiesto.auditoria_mayorista antes de usar esa columna.")
+
+            for caso in AUDITORIA_MAYORISTA["detalle"]:
+                if caso["veredicto"] == "DISCREPA":
+                    log(
+                        f"  SKU {caso['sku_id']:<10} qty={caso['umbral']:<3} "
+                        f"{caso['detalle']}"
+                    )
+
+            log("!" * 110)
+
+        if AUDITORIA_MAYORISTA["fallidas"]:
+            log(
+                f"                   {AUDITORIA_MAYORISTA['fallidas']} no se "
+                "pudieron completar (la fila conserva el reconstruido)"
             )
 
     log("")
