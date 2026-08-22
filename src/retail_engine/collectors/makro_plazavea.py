@@ -129,10 +129,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import csv
 import gzip
 import hashlib
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -154,7 +156,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.13-13"
+VERSION = "2026.08.21-14"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -163,9 +165,62 @@ VERSION = "2026.08.13-13"
 # v13 NO cambia ningún campo de `Fila` — solo corrige control de flujo y
 # amplía el manifiesto — así que SCHEMA_VERSION se queda en "3". Un CSV
 # de v12 y uno de v13 se apendean sin disparar `archivar_si_cambio_el_esquema`.
+#
+# v14 (bloque A de 1.1.0) TAMPOCO toca `Fila`: cambia dónde se escribe, cómo
+# se selecciona y dos reglas de clasificación, ninguna columna. Sigue en "3"
+# a propósito — el "4" pertenece al bloque B, que agrega las 22 columnas del
+# precio mayorista (decisiones_1.1.0 §5). Subirlo acá haría que un CSV de
+# v14 dijera que tiene columnas que no tiene.
 SCHEMA_VERSION = "3"
 
 CAMBIOS = [
+    "14  BLOQUE A de 1.1.0 (decisiones_1.1.0.md §4/§7/§8/§8.1/§9): salida,"
+    " flags y bugs. NO toca el esquema — SCHEMA_VERSION sigue en 3 y ninguna"
+    " columna se agrega ni se renombra; las 22 del precio mayorista son el"
+    " bloque B ·"
+    " (1) MOTOR pasa de makro a makro_plazavea: el colector se identifica por"
+    " FUENTE, no por retailer — makro_pe es el mismo retailer con otra fuente"
+    " y no puede compartir carpeta ·"
+    " (2) la raíz de salida se deriva del repo buscando pyproject.toml hacia"
+    " arriba, en vez de colgar de BASE_DIR: tras el movimiento a src/ eso"
+    " escribía datos DENTRO del paquete instalable"
+    " (src/retail_engine/collectors/salida/) ·"
+    " (3) UNA CARPETA POR CORRIDA, inmutable:"
+    " data/makro_plazavea/<run_id>/ con filas.csv + run.json + raw.jsonl.gz,"
+    " más runs.jsonl y last_run.json en la raíz del colector."
+    " carpeta_corrida() es la única función que construye rutas. La propiedad"
+    " de serie de tiempo ya no la da apendear a un archivo mutable sino"
+    " acumular carpetas: un glob sobre run_*/filas.csv es la historia entera ·"
+    " (4) UN SOLO CSV LARGO en vez de uno por sucursal: el nodo es una"
+    " columna, así que una sucursal nueva agrega valores, no archivos ·"
+    " (5) --reiniciar ELIMINADO: con carpetas inmutables no hay archivo"
+    " acumulado que reiniciar, y lo único que el flag podría borrar es"
+    " historia ya cerrada. archivar_si_cambio_el_esquema() se va por la misma"
+    " razón estructural (nadie apendea bajo una cabecera ajena); el"
+    " razonamiento queda escrito donde vivía la función ·"
+    " (6) --skus: lista explícita de hasta 20 sku_id, salta el descubrimiento,"
+    " incompatible con --catalogo/--muestra. Resuelve el catálogo con"
+    " fq=skuId: batcheado (20 SKUs en 2 requests, no 20), reordenando items"
+    " por el SKU pedido y saltando el filtro de stock de cadena — los dos bugs"
+    " de §9. Un SKU pedido que el catálogo no devuelve SE ESCRIBE igual como"
+    " SKU_NO_ENCONTRADO, una fila por nodo: si desapareciera no habría cómo"
+    " distinguir 'no existe' de 'no lo pedí'. El manifiesto marca"
+    " modo_seleccion=skus_explicitos para poder filtrar estas corridas al"
+    " armar la serie. NO es el panel.json que mató v11: la lista viaja en la"
+    " línea de comandos y se resuelve contra el catálogo de esa corrida ·"
+    " (7) --dry-run: mide, imprime y no escribe NADA — ni CSV, ni manifiesto,"
+    " ni crudo, ni la carpeta ·"
+    " (8) fulfillment_type gana operador_externo para la firma identificada"
+    " que no es Makro ni PlazaVea (caso real STK917NF / DCK-NF-MK-917 /"
+    " DD-NF-CD-917-URBANO, SLA único y despacho confirmado): desconocido queda"
+    " reservado para cuando FALTA información, que es lo contrario ·"
+    " (9) price_per_unit deja de calcularse por división cuando"
+    " unit_multiplier != 1 y se LEE de list_price (Maracuyá: 1.23/0.2 = 6.15 y"
+    " el kilo real es 6.19 — el redondeo de VTEX se amplifica al dividir por"
+    " un multiplicador menor a 1). La división se conserva como control: si"
+    " difiere de list_price en más de un céntimo entra la cuarta regla DQ,"
+    " DQ_UNIDAD_INCONSISTENTE. discount_pct NO se toca: ya estaba protegido"
+    " con multiplicador == 1 desde 1.0.0",
     "13  síntesis de hallazgos de Hermes/Codex/ChatGPT sobre la corrida real"
     " en Kali (ver aporte_hermes.txt, aporte_codex.txt,"
     " feedbacks/feedback_conjunto_codex_chatgpt_para_claude_v12.txt)."
@@ -232,14 +287,100 @@ CAMBIOS = [
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Slug del motor. Nombra la carpeta de salida y es lo que impide que la
-# salida de Makro se confunda con la de Tottus o Sodimac cuando existan
-# sus propios motores: un solo raíz `salida/`, una subcarpeta por motor.
-MOTOR = "makro"
 
-RAIZ_SALIDA = BASE_DIR / "salida"
+def raiz_repo() -> Path:
+    """
+    La raíz del repo, por MARCA (`pyproject.toml`), no contando niveles.
+
+    Hasta 1.0.0 la salida colgaba de `BASE_DIR`, que antes del movimiento a
+    `src/` era la carpeta del script y quedaba junto al repo. Después del
+    movimiento el mismo código resuelve `src/retail_engine/collectors/salida/`
+    — o sea, datos generados DENTRO del paquete instalable. Contar `parents[N]`
+    lo arreglaría hasta el próximo movimiento de carpetas; buscar el marcador
+    aguanta cualquier reorganización.
+
+    Si no aparece el marcador (paquete instalado en site-packages, sin repo
+    alrededor), se cae a `BASE_DIR`: peor lugar, pero nunca una excepción a
+    mitad de corrida.
+    """
+
+    for padre in (BASE_DIR, *BASE_DIR.parents):
+        if (padre / "pyproject.toml").exists():
+            return padre
+
+    return BASE_DIR
+
+
+RAIZ_REPO = raiz_repo()
+
+# Slug del COLECTOR, no del retailer. `makro_pe` es el mismo retailer con
+# otra fuente, y las dos no pueden compartir carpeta: lo que identifica a un
+# dataset es de dónde se sacó, no de quién habla.
+MOTOR = "makro_plazavea"
+
+RAIZ_SALIDA = RAIZ_REPO / "data"
 SALIDA = RAIZ_SALIDA / MOTOR
-MANIFEST_FILE = SALIDA / "ultima_corrida.json"
+
+# Dónde escribía 1.0.0 (dentro del paquete). Solo se usa para AVISAR si
+# quedaron datos ahí: el motor nunca mueve el histórico de nadie.
+RAIZ_SALIDA_LEGADO = BASE_DIR / "salida"
+
+
+# ---------------------------------------------------------------------------
+# RUTAS DE SALIDA — una carpeta por corrida (decisiones_1.1.0 §7)
+# ---------------------------------------------------------------------------
+#
+# Hasta 1.0.0 la serie de tiempo era "apendear al CSV de la sucursal". Eso
+# ataba tres cosas que no tienen por qué ir juntas: que el dato sea
+# acumulativo, que el archivo sea mutable, y que haya un archivo por nodo.
+# Ahora la serie la produce la ACUMULACIÓN DE CARPETAS: cada corrida escribe
+# una carpeta nueva e inmutable, y leer la historia entera es un glob.
+#
+# `carpeta_corrida()` es la ÚNICA función que construye rutas de salida.
+# Todo lo que escribe cuelga de acá — si aparece un `SALIDA / "algo"` suelto
+# en el resto del archivo, es un bug.
+
+
+def carpeta_corrida(run_id: str = "") -> Path:
+    """
+    La carpeta de una corrida. Se llama IGUAL que el `run_id`.
+
+    `RUN_ID` ya nace con el prefijo `run_` (`run_20260821_191415`), así que
+    la carpeta es `data/makro_plazavea/run_20260821_191415/`. No agregar otro
+    `run_` acá: un solo identificador, imposible de desincronizar.
+    """
+
+    return SALIDA / (run_id or RUN_ID)
+
+
+def archivo_filas(run_id: str = "") -> Path:
+    """El CSV largo de la corrida: todos los nodos, `node_id` como columna."""
+
+    return carpeta_corrida(run_id) / "filas.csv"
+
+
+def archivo_manifiesto(run_id: str = "") -> Path:
+    """El manifiesto de ESTA corrida, dentro de su propia carpeta."""
+
+    return carpeta_corrida(run_id) / "run.json"
+
+
+def archivo_evidencia(run_id: str = "") -> Path:
+    """El crudo de la corrida. Nombre fijo: el run_id ya está en la carpeta."""
+
+    return carpeta_corrida(run_id) / "raw.jsonl.gz"
+
+
+def archivo_indice() -> Path:
+    """Índice append-only del colector: una línea por corrida."""
+
+    return SALIDA / "runs.jsonl"
+
+
+def archivo_ultima() -> Path:
+    """Copia del manifiesto de la última corrida, para no tener que globear."""
+
+    return SALIDA / "last_run.json"
 
 BASE_URL = "https://www.makro.plazavea.com.pe"
 SALES_CHANNEL = "9"
@@ -282,6 +423,10 @@ NOMBRES_BASURA = (
 class Nodo:
     node_id: str
     branch: str
+    # Nombre del CSV por sucursal de 1.0.0. Desde §8 hay UN solo CSV largo y
+    # el motor ya no lo usa para nada, pero se conserva: es lo que permite
+    # rastrear de qué nodo salió un `makro_359_santa_anita.csv` de la
+    # historia vieja. Borrarlo no ahorra nada y pierde esa referencia.
     archivo: str
 
     postal_code: str
@@ -1444,6 +1589,277 @@ async def descubrir_catalogo(
     return list(encontrados.values())
 
 
+# ===========================================================================
+# SELECCIÓN EXPLÍCITA — `--skus` (decisiones_1.1.0 §8.1)
+# ===========================================================================
+#
+# El descubrimiento elige contra el catálogo VIVO: dos corridas separadas por
+# días no eligen lo mismo, así que una corrida vieja no se puede volver a
+# medir. `--skus` invierte eso: los SKUs entran por parámetro y el catálogo
+# solo se consulta para lo que únicamente él sabe.
+#
+# NO es el `panel.json` que v11 mató. Aquello era un archivo en disco que se
+# LEÍA para decidir qué medir y envejecía en silencio. Acá la lista viaja en
+# la línea de comandos, queda escrita en el manifiesto de la corrida, y se
+# resuelve contra el catálogo de ESA corrida. Sigue sin haber archivos de
+# entrada.
+
+# Techo deliberado: `--skus` es para responder una pregunta puntual o
+# remedir un baseline, no para extraer a lo grande. Lo grande se descubre.
+MAX_SKUS_EXPLICITOS = 20
+
+# `fq=skuId:` acepta varios filtros en la misma consulta, igual que el
+# `fq=productId:` de refrescar_stock_cadena: 20 SKUs salen en 2 requests, no
+# en 20.
+LOTE_SKUS = 10
+
+
+def parsear_lista_skus(texto: str) -> list[str]:
+    """Comas, espacios o saltos de línea. Conserva el orden y deduplica."""
+
+    crudos = [t.strip() for t in re.split(r"[,\s]+", texto or "") if t.strip()]
+
+    vistos: set[str] = set()
+    lista: list[str] = []
+
+    for sku in crudos:
+        if sku in vistos:
+            continue
+
+        vistos.add(sku)
+        lista.append(sku)
+
+    return lista
+
+
+def ordenar_items(crudo: dict, sku_id: str) -> bool:
+    """
+    Pone el SKU pedido en `items[0]`, que es donde `parsear_producto` mira.
+
+    BUG de §9, encontrado al implementar esto en la sonda v5. `fq=skuId:`
+    FILTRA por SKU pero devuelve el PRODUCTO entero, con todas sus variantes.
+    `parsear_producto` lee `items[0]`: sin reordenar, pedir la variante de 1L
+    de un producto que también viene en 4L devuelve la fila de la de 4L, con
+    otro `sku_id` y otro precio. No falla, no avisa: mide otra cosa.
+
+    Muta `crudo` a propósito y devuelve si encontró el SKU. Llamarla una vez
+    por SKU y JUSTO ANTES de leerlo — reordenar para todos por adelantado deja
+    en cabeza al último.
+    """
+
+    items = crudo.get("items") or []
+
+    for posicion, item in enumerate(items):
+        if s(item.get("itemId")) == sku_id:
+            if posicion:
+                items.insert(0, items.pop(posicion))
+
+            return True
+
+    return False
+
+
+def producto_forzado(crudo: dict) -> Producto | None:
+    """
+    `parsear_producto` saltando el filtro de stock de cadena.
+
+    BUG de §9, el segundo. `parsear_producto` descarta lo que la cadena no
+    tiene disponible (`AvailableQuantity` vacío). Al DESCUBRIR está bien: no
+    tiene sentido muestrear lo que nadie puede comprar. Al medir una LISTA
+    EXPLÍCITA está al revés — un SKU que se quedó sin stock es justo el caso
+    que se quería ver, y descartarlo lo hace desaparecer de la salida sin
+    distinguirse de "no lo pedí".
+
+    La disponibilidad se fuerza sobre una COPIA del crudo y después se borra
+    `stock_catalog`, para no dejar grabado un número que el servidor no dijo.
+    El estado real sigue saliendo de la medición (`availability`) y del stock
+    de cadena refrescado (`chain_stock`).
+    """
+
+    copia = copy.deepcopy(crudo)
+
+    items = copia.get("items") or []
+
+    if not items:
+        return None
+
+    vendedores = items[0].get("sellers") or []
+
+    if not vendedores:
+        return None
+
+    oferta = vendedores[0].setdefault("commertialOffer", {})
+
+    if not oferta.get("AvailableQuantity"):
+        oferta["AvailableQuantity"] = 1
+
+    producto = parsear_producto(copia)
+
+    if producto is not None:
+        producto.stock_catalog = ""
+
+    return producto
+
+
+async def descubrir_por_skus(
+    cliente: Cliente,
+    sku_ids: list[str],
+) -> tuple[list[Producto], list[str], list[str]]:
+    """
+    Resuelve una lista fija de `sku_id` contra el catálogo, en pocas requests.
+
+    Devuelve `(productos, ausentes, sin_resolver)`, y la diferencia entre los
+    dos últimos es el punto de toda la función:
+
+        ausentes      se preguntó y el catálogo NO lo devolvió. Es un hecho
+                      sobre el SKU: no existe, o salió del surtido. Se le
+                      escribe fila igual, SKU_NO_ENCONTRADO (§8.1).
+        sin_resolver  NUNCA se llegó a preguntar, porque se agotó el
+                      presupuesto de requests. No es un hecho sobre el SKU,
+                      es un hecho sobre la CORRIDA. NO se le escribe fila:
+                      inventarle un SKU_NO_ENCONTRADO diría que el catálogo
+                      lo negó cuando nadie se lo preguntó.
+
+    Es la misma distinción que v13 introdujo en la medición (filas medidas vs
+    `manifiesto.medicion.pendientes`), por la misma razón: un presupuesto
+    agotado no puede disfrazarse de dato.
+    """
+
+    log(f"Resolviendo {len(sku_ids)} SKUs explícitos contra el catálogo...")
+
+    por_sku: dict[str, Producto] = {}
+    forzados: list[str] = []
+    sin_resolver: list[str] = []
+
+    lotes = [
+        sku_ids[i:i + LOTE_SKUS] for i in range(0, len(sku_ids), LOTE_SKUS)
+    ]
+
+    for numero, lote in enumerate(lotes, 1):
+        filtros = "&".join(f"fq=skuId:{sku}" for sku in lote)
+
+        url = (
+            f"{BASE_URL}/api/catalog_system/pub/products/search"
+            f"?{filtros}&_from=0&_to={len(lote) * 2 - 1}&sc={SALES_CHANNEL}"
+        )
+
+        try:
+            status, datos, _ = await cliente.pedir(url)
+        except TopeAgotadoError as exc:
+            # Condición de CORRIDA, no de SKU. Se detiene acá: lo ya
+            # resuelto se conserva y lo que faltaba queda como
+            # `sin_resolver`, que es distinto de "no existe".
+            sin_resolver = [
+                s for lote_pendiente in lotes[numero - 1:]
+                for s in lote_pendiente
+                if s not in por_sku
+            ]
+
+            log(
+                f"  lote {numero}: presupuesto agotado ({exc}). "
+                f"{len(sin_resolver)} SKUs quedan sin preguntar."
+            )
+            AVISOS.append(
+                f"Presupuesto agotado resolviendo --skus: {len(sin_resolver)} "
+                "SKUs nunca se preguntaron (no son 'no encontrados'). "
+                "Ver manifiesto.seleccion.skus_sin_resolver."
+            )
+            ESTADISTICAS_CATALOGO.update(
+                {
+                    "clasificacion": "INCOMPLETO_NO_PLANEADO",
+                    "completo": False,
+                    "motivo": "REQUEST_BUDGET_EXHAUSTED",
+                }
+            )
+            break
+        except Exception as exc:
+            log(f"  lote {numero}: {type(exc).__name__} al pedir el catálogo.")
+            AVISOS.append(
+                f"Lote {numero} de --skus falló ({type(exc).__name__}): "
+                "esos SKUs quedan como no encontrados."
+            )
+            continue
+
+        if status >= 400 or not isinstance(datos, list):
+            log(f"  lote {numero}: HTTP {status}.")
+            AVISOS.append(
+                f"Lote {numero} de --skus respondió HTTP {status}: "
+                "esos SKUs quedan como no encontrados."
+            )
+            continue
+
+        for crudo in datos:
+            if not isinstance(crudo, dict):
+                continue
+
+            for sku in lote:
+                if sku in por_sku or not ordenar_items(crudo, sku):
+                    continue
+
+                producto = producto_forzado(crudo)
+
+                if producto is None or producto.sku_id != sku:
+                    continue
+
+                if not parsear_producto(crudo):
+                    forzados.append(sku)
+
+                por_sku[sku] = producto
+
+        log(f"  lote {numero}/{len(lotes)}: {len(por_sku)}/{len(sku_ids)} "
+            f"resueltos  ({cliente.contador} requests)")
+
+    productos = [por_sku[sku] for sku in sku_ids if sku in por_sku]
+
+    nunca_preguntados = set(sin_resolver)
+    ausentes = [
+        sku for sku in sku_ids
+        if sku not in por_sku and sku not in nunca_preguntados
+    ]
+
+    if forzados:
+        AVISOS.append(
+            f"{len(forzados)} SKUs sin stock de cadena se midieron igual "
+            f"(parsear_producto los habría descartado): {', '.join(forzados)}."
+        )
+
+    if ausentes:
+        AVISOS.append(
+            f"{len(ausentes)} SKUs pedidos no existen en el catálogo y se "
+            f"escriben como SKU_NO_ENCONTRADO: {', '.join(ausentes)}."
+        )
+
+    return productos, ausentes, sin_resolver
+
+
+def fila_sku_ausente(sku_id: str, nodo: Nodo, momento: datetime) -> Fila:
+    """
+    La fila de un SKU que se pidió y el catálogo no devolvió.
+
+    §8.1: **se escribe igual**. Si desapareciera de la salida no habría forma
+    de distinguir *no existe* de *no lo pedí* — la misma razón por la que
+    ninguna fila se descarta en silencio en el resto del motor.
+
+    No inventa nada: sin catálogo no hay nombre, ni marca, ni precio. Lo
+    único que afirma es que se preguntó y no vino.
+    """
+
+    return Fila(
+        timestamp=momento.isoformat(timespec="seconds"),
+        fecha=momento.strftime("%Y-%m-%d"),
+        branch=nodo.branch,
+        node_id=nodo.node_id,
+        sku_id=sku_id,
+        postal_sent=nodo.postal_code,
+        run_id=RUN_ID,
+        logistics_status="SKU_NO_ENCONTRADO",
+        node_resolved="NONE",
+        price_status="NO_PRICE",
+        error_class="NOT_FOUND",
+        error="El SKU se pidió con --skus y el catálogo no lo devolvió.",
+    )
+
+
 def seleccionar(
     productos: list[Producto],
     muestra: int,
@@ -1494,6 +1910,12 @@ STOCK_CADENA: dict[str, str] = {}
 # que la produjo.
 RUN_ID = ""
 GUARDAR_EVIDENCIA = True
+
+# --dry-run: se mide y se imprime, no se escribe NADA (§8.1). Vive acá
+# arriba, junto a GUARDAR_EVIDENCIA, porque lo consultan funciones de
+# escritura repartidas por el archivo y pasarlo por parámetro obligaría
+# a tocar firmas que este bloque no tiene por qué tocar.
+DRY_RUN = False
 
 # Navegador de la corrida. `orderForm` necesita un contexto limpio por
 # llamada porque el carrito es estado de sesión (ver consultar_orderform).
@@ -1630,11 +2052,8 @@ def guardar_evidencia(
     tocar el disco.
     """
 
-    if not RUN_ID or not GUARDAR_EVIDENCIA:
+    if not RUN_ID or not GUARDAR_EVIDENCIA or DRY_RUN:
         return
-
-    destino = SALIDA / "raw" / ahora().strftime("%Y-%m-%d")
-    destino.mkdir(parents=True, exist_ok=True)
 
     registro = {
         "run_id": RUN_ID,
@@ -1647,7 +2066,12 @@ def guardar_evidencia(
         "response": datos,
     }
 
-    archivo = destino / f"{RUN_ID}.jsonl.gz"
+    # §7: nombre fijo dentro de la carpeta de la corrida. El `raw/<fecha>/`
+    # de 1.0.0 repetía el run_id en el nombre del archivo y separaba el crudo
+    # de las filas que explicaba; ahora la evidencia viaja junto al CSV que
+    # produjo, que es lo que hace barato replayear un fix de parser.
+    archivo = archivo_evidencia()
+    archivo.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         with gzip.open(archivo, "at", encoding="utf-8") as salida:
@@ -1934,6 +2358,100 @@ def extraer_logistica(datos: Any, nodo: Nodo) -> dict[str, str]:
     return con_contexto(candidatos[0])
 
 
+# Tolerancia del control de peso variable. DOS condiciones, y hay que pasar
+# las dos para que la fila se marque.
+#
+# §4 pide marcar cuando la reconstrucción difiere de `list_price` "en más de
+# un céntimo". Medido contra las 8 filas de peso variable de golden_v5.csv,
+# ese umbral solo se dispara en 4 de ellas — y las 4 son normales:
+#
+#     Huachalomo   28.9857 vs 28.99   dif 0.0043   0.01%
+#     Guiso        28.4857 vs 28.49   dif 0.0043   0.02%
+#     Granadilla    9.6667 vs  9.69   dif 0.0233   0.24%
+#     Maracuyá      6.1500 vs  6.19   dif 0.0400   0.65%
+#
+# La causa está en el propio §4: el peso es un PROMEDIO DECLARADO ("0.2 kg
+# aprox."), no el peso real de la pieza. O sea que la división y `list_price`
+# tienen por qué diferir siempre, y el céntimo absoluto convierte el control
+# en una alarma que suena en la mitad de los productos por peso. Esa es
+# exactamente la falla que ya costó una regla DQ (ver DQ_PRECIO_MAYOR, falso
+# positivo en 7 de 100 SKUs por confundir unidad con error).
+#
+# El céntimo se conserva como PISO —para que un producto barato no dispare
+# por ruido de centavos— y se le suma un piso RELATIVO. El error que este
+# control busca de verdad es un multiplicador en otra escala (gramos donde
+# dicen kilos: 1000x, no 0.65%), y 5% lo separa del promedio declarado con
+# casi dos órdenes de magnitud de margen sobre el peor caso medido.
+TOLERANCIA_UNIDAD = 0.01
+TOLERANCIA_UNIDAD_RELATIVA = 0.05
+
+
+def calcular_precio_por_unidad(
+    selling_price_cents: Any,
+    list_price_cents: Any,
+    unit_multiplier: Any,
+) -> tuple[str, bool]:
+    """
+    Precio por unidad de medida, y si la reconstrucción lo contradice.
+
+    Devuelve `(precio_por_unidad, sospechoso)`.
+
+    Dos ramas, porque son dos preguntas distintas (§4):
+
+    **`unit_multiplier == 1`** — producto por unidad. El precio por unidad ES
+    el precio, y `sellingPrice / multiplicador` da exactamente eso.
+
+    **`unit_multiplier != 1`** — peso variable. Acá `list_price` NO es precio
+    tachado: es el precio de la unidad base, y VTEX lo dice él mismo. Hasta
+    1.0.0 esto se calculaba dividiendo (`venta / 100 / multiplicador`), que
+    arrastra el redondeo de VTEX y lo AMPLIFICA cuando el multiplicador es
+    menor a 1:
+
+        Maracuyá: 1.23 ÷ 0.2 = 6.15   y el kilo real es 6.19
+
+    Cuatro céntimos por kilo no rompen una fila, pero sí una comparación
+    entre retailers, que es justo para lo que existe esta columna. Leer el
+    dato que el servidor ya dio es más barato y más cierto que derivarlo.
+
+    La división se conserva como CONTROL: si difiere de `list_price` más de
+    lo que el promedio declarado explica (ver TOLERANCIA_UNIDAD*), el
+    multiplicador no corresponde al precio y la fila sale marcada
+    (`DQ_UNIDAD_INCONSISTENTE`). No se corrige el número —no sabemos cuál de
+    los dos está mal—, se avisa.
+    """
+
+    try:
+        venta = float(selling_price_cents or 0)
+        lista = float(list_price_cents or 0)
+        multiplicador = float(unit_multiplier or 1)
+    except (TypeError, ValueError):
+        return "", False
+
+    if multiplicador <= 0 or venta <= 0:
+        return "", False
+
+    division = venta / 100 / multiplicador
+
+    if multiplicador == 1:
+        return f"{division:.4f}", False
+
+    # Peso variable sin `list_price` utilizable: queda la división, que es
+    # lo único que hay. Vacío sería peor: el dato existe, solo es más flojo.
+    if lista <= 0:
+        return f"{division:.4f}", False
+
+    por_unidad = lista / 100
+
+    diferencia = abs(division - por_unidad)
+
+    sospechoso = (
+        diferencia > TOLERANCIA_UNIDAD
+        and diferencia > por_unidad * TOLERANCIA_UNIDAD_RELATIVA
+    )
+
+    return f"{por_unidad:.4f}", sospechoso
+
+
 def evaluar_calidad(fila: "Fila", item: dict[str, str], producto: Producto) -> str:
     """
     Reglas de calidad sobre la fila ya construida.
@@ -1949,6 +2467,16 @@ def evaluar_calidad(fila: "Fila", item: dict[str, str], producto: Producto) -> s
                           del descuento y suele indicar mala lectura.
         DQ_PRECIO_CERO    precio 0 con el ítem disponible. Casi siempre
                           es un placeholder, no una ganga.
+        DQ_UNIDAD_INCONSISTENTE
+                          peso variable donde `sellingPrice / multiplicador`
+                          no reconstruye `listPrice`. Uno de los dos está
+                          mal y no sabemos cuál: se avisa, no se corrige
+                          (§4).
+
+    La cuarta entra con la misma vara que las otras tres: tiene un caso real
+    detrás y un consumidor concreto. `price_per_unit` es la columna con la
+    que se compara contra otro retailer; si el multiplicador declarado no
+    corresponde al precio, esa comparación sale mal sin que nada lo delate.
 
     Devuelve las que fallaron separadas por "|", o vacío si la fila está
     limpia.
@@ -1976,6 +2504,15 @@ def evaluar_calidad(fila: "Fila", item: dict[str, str], producto: Producto) -> s
 
     except (TypeError, ValueError):
         pass
+
+    _, unidad_sospechosa = calcular_precio_por_unidad(
+        item.get("sellingPrice") if item else None,
+        item.get("listPrice") if item else None,
+        item.get("unitMultiplier") if item else None,
+    )
+
+    if unidad_sospechosa:
+        fallos.append("DQ_UNIDAD_INCONSISTENTE")
 
     return "|".join(fallos)
 
@@ -2061,7 +2598,8 @@ def clasificar_fulfillment(
       tienda_raiz       almacén de la sucursal, pero seller principal
       proveedor         stock del proveedor (dropshipping)
       generico_pv       operación genérica de PlazaVea, no de Makro
-      desconocido       firma que todavía no sabemos leer
+      operador_externo  origen identificado, pero no es Makro ni PlazaVea
+      desconocido       falta información logística para decidir
 
     Ejemplo real capturado el 13-ago (Crepera VENTUS):
         warehouseId  STKPRVVNT      -> STocK PRoVeedor VeNTus
@@ -2086,6 +2624,28 @@ def clasificar_fulfillment(
     if "-PV-" in courier or "PV" in dock or "GNRC" in courier:
         return "generico_pv"
 
+    # `operador_externo` vs `desconocido` (§9).
+    #
+    # Hasta 1.0.0 todo lo que no encajaba en los patrones de arriba caía en
+    # `desconocido`, que mezclaba dos cosas opuestas: "VTEX no me dijo de
+    # dónde sale" y "VTEX me lo dijo con todo detalle y resulta que no es
+    # Makro". Caso real:
+    #
+    #     warehouseId  STK917NF
+    #     dockId       DCK-NF-MK-917
+    #     courierId    DD-NF-CD-917-URBANO
+    #     SLA único, despacho confirmado
+    #
+    # El origen está perfectamente identificado. Llamarlo `desconocido`
+    # invita a tratarlo como dato faltante —algo que revisar o reintentar—
+    # cuando es un hecho firme sobre el surtido: ese SKU no sale de Makro.
+    #
+    # Se exige la firma COMPLETA (almacén + dock + courier) para no
+    # reclasificar como "identificado" una respuesta a medio parsear.
+    if warehouse and dock and courier:
+        return "operador_externo"
+
+    # Reservado para lo que de verdad falta información.
     return "desconocido"
 
 
@@ -2368,15 +2928,19 @@ def construir_fila(
     fila.measurement_unit = item.get("measurementUnit", "")
     fila.unit_multiplier = item.get("unitMultiplier", "")
 
+    # Precio por unidad de medida: el único comparable entre tiendas cuando
+    # el producto se vende por peso. La regla vive en una función pura
+    # (§4) — acá solo se aplica y se anota la sospecha.
+    fila.price_per_unit, _ = calcular_precio_por_unidad(
+        item.get("sellingPrice"),
+        item.get("listPrice"),
+        item.get("unitMultiplier"),
+    )
+
     try:
         lista = float(item.get("listPrice") or 0)
         venta = float(item.get("sellingPrice") or 0)
         multiplicador = float(item.get("unitMultiplier") or 1)
-
-        # Precio por unidad de medida: es el único comparable entre
-        # tiendas cuando el producto se vende por peso.
-        if multiplicador > 0 and venta > 0:
-            fila.price_per_unit = f"{venta / 100 / multiplicador:.4f}"
 
         # El descuento solo tiene sentido cuando ambos precios están en
         # la MISMA base. En un producto por peso, listPrice es por kilo y
@@ -2762,76 +3326,102 @@ async def medir(
 # ===========================================================================
 
 
-def archivar_si_cambio_el_esquema(momento: datetime) -> list[str]:
+# La guardia de esquema de 1.0.0 (`archivar_si_cambio_el_esquema`) se
+# ELIMINA acá, y conviene dejar escrito por qué antes de que alguien la
+# extrañe.
+#
+# Existía porque el CSV era APPEND: agregar un campo a `Fila` agregaba una
+# columna, y `DictWriter` seguía escribiendo filas más anchas debajo de una
+# cabecera más angosta — el histórico se desalineaba en silencio. La guardia
+# renombraba el archivo viejo antes de que eso pasara.
+#
+# Con una carpeta inmutable por corrida (§7) el vector desapareció: cada
+# corrida escribe su propio `filas.csv` con su propia cabecera y no vuelve a
+# abrirse nunca. Dos corridas con esquemas distintos ya no comparten archivo,
+# así que no hay nada que desalinear. La propiedad que la guardia protegía
+# —poder saber bajo qué reglas nació una fila— la sigue dando
+# `schema_version`, que va escrito en CADA fila (§6.7).
+#
+# Lo que SÍ hereda el lector: un glob sobre `run_*/filas.csv` puede juntar
+# cabeceras distintas. Eso es trabajo de la capa de consolidación, que tiene
+# `schema_version` para decidir, y no algo que el motor pueda resolver
+# escribiendo.
+
+
+def escribir_filas(filas: list[Fila]) -> Path | None:
     """
-    Protege el histórico cuando cambian las columnas.
+    Escribe el CSV largo de la corrida. Una fila por (SKU, nodo).
 
-    El esquema del CSV se deriva de los campos de `Fila`
-    (`COLUMNAS = list(Fila().__dict__.keys())`), así que agregar un campo
-    agrega una columna. Eso es cómodo, pero en modo append es peligroso:
-    el archivo viejo ya tiene su cabecera escrita, y `DictWriter` seguiría
-    apendeando filas con MÁS columnas debajo de una cabecera con MENOS.
-    El CSV queda desalineado en silencio y el histórico se corrompe.
+    Cambia respecto de 1.0.0 en dos cosas, y las dos son de §7/§8:
 
-    En vez de fallar a mitad de corrida, se detecta ANTES de medir: el
-    archivo viejo se renombra con la fecha de corte y la corrida empieza
-    uno nuevo. No se pierde nada y los dos quedan legibles por separado.
-    """
+    1. **Un solo archivo**, no uno por sucursal. El nodo es una COLUMNA
+       (`node_id`), no un nombre de archivo. Así una sucursal nueva no crea
+       un archivo nuevo ni cambia el esquema: agrega valores a una columna.
+    2. **Se escribe, no se apendea.** La carpeta es de esta corrida y no
+       existía hace un segundo; abrir en modo append sería sugerir que
+       alguien más podría estar escribiendo ahí.
 
-    archivados: list[str] = []
-
-    for nodo in NODOS.values():
-        destino = SALIDA / nodo.archivo
-
-        if not destino.exists():
-            continue
-
-        with destino.open(encoding="utf-8-sig") as archivo:
-            cabecera = archivo.readline().strip()
-
-        if not cabecera:
-            continue
-
-        if cabecera.split(",") == COLUMNAS:
-            continue
-
-        sufijo = momento.strftime("%Y%m%d_%H%M%S")
-        viejo = destino.with_name(f"{destino.stem}__esquema_anterior_{sufijo}.csv")
-
-        destino.rename(viejo)
-        archivados.append(viejo.name)
-
-    return archivados
-
-
-def apendear_csv(nodo: Nodo, filas: list[Fila], reiniciar: bool) -> Path:
-    """
-    Apendea al CSV de la sucursal.
-
-    APPEND, no overwrite: cada corrida suma una observación fechada.
-    Eso es lo que convierte el archivo en una serie de tiempo en vez de
-    una foto que se pisa a sí misma.
+    La serie de tiempo no se pierde: la producen las carpetas acumuladas.
+    `read_csv('data/makro_plazavea/run_*/filas.csv')` es la historia entera.
     """
 
-    SALIDA.mkdir(parents=True, exist_ok=True)
+    if DRY_RUN:
+        return None
 
-    destino = SALIDA / nodo.archivo
+    destino = archivo_filas()
+    destino.parent.mkdir(parents=True, exist_ok=True)
 
-    if reiniciar and destino.exists():
-        destino.unlink()
-
-    nuevo = not destino.exists()
-
-    with destino.open("a", encoding="utf-8-sig", newline="") as archivo:
+    with destino.open("w", encoding="utf-8-sig", newline="") as archivo:
         escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS)
-
-        if nuevo:
-            escritor.writeheader()
+        escritor.writeheader()
 
         for fila in filas:
             escritor.writerow(asdict(fila))
 
     return destino
+
+
+def registrar_corrida(resumen: dict[str, Any]) -> None:
+    """
+    Deja el manifiesto en los tres lugares donde sirve para algo distinto.
+
+        run.json        dentro de la carpeta — el dataset se explica solo
+        last_run.json   en la raíz — la última corrida sin globear
+        runs.jsonl      en la raíz, APPEND — el índice de la serie
+
+    `runs.jsonl` es lo único append-only que queda en el layout, y a
+    propósito: es un índice, no un dataset. Guarda una línea PLANA por
+    corrida (no el manifiesto entero) para que siga siendo legible con
+    `tail` cuando haya mil corridas.
+    """
+
+    if DRY_RUN:
+        return
+
+    carpeta = carpeta_corrida()
+    carpeta.mkdir(parents=True, exist_ok=True)
+
+    texto = json.dumps(resumen, ensure_ascii=False, indent=2)
+
+    archivo_manifiesto().write_text(texto, encoding="utf-8")
+    archivo_ultima().write_text(texto, encoding="utf-8")
+
+    indice = {
+        "run_id": resumen.get("run_id"),
+        "corrida": resumen.get("corrida"),
+        "version_script": resumen.get("version_script"),
+        "schema_version": resumen.get("schema_version"),
+        "modo": resumen.get("modo"),
+        "modo_seleccion": resumen.get("modo_seleccion"),
+        "filas": resumen.get("filas_escritas"),
+        "requests_totales": resumen.get("requests_totales"),
+        "duracion_segundos": resumen.get("duracion_segundos"),
+        "corrida_completa": resumen.get("corrida_completa"),
+        "exit_code": resumen.get("exit_code"),
+    }
+
+    with archivo_indice().open("a", encoding="utf-8") as archivo:
+        archivo.write(json.dumps(indice, ensure_ascii=False) + "\n")
 
 
 def evaluar_corrida(resumen: dict[str, Any]) -> tuple[bool, list[str], int]:
@@ -2893,7 +3483,14 @@ def escribir_manifiesto(
         "retailer": RETAILER,
         "contrato_vtex": dict(CONTRATO),
         "archivo_script": Path(__file__).name,
-        "carpeta_salida": str(SALIDA),
+        "carpeta_salida": str(carpeta_corrida()),
+        "raiz_colector": str(SALIDA),
+        # §8.1: qué eligió esta corrida. `descubrimiento` es una muestra del
+        # catálogo; `skus_explicitos` es una remedición dirigida y NO debe
+        # promediarse con las otras al armar la serie. Va también acá arriba,
+        # además de en `seleccion`, para poder filtrar con un solo `jq`.
+        "modo_seleccion": SELECCION.get("modo", "descubrimiento"),
+        "dry_run": DRY_RUN,
         "corrida": inicio.isoformat(timespec="seconds"),
         "duracion_segundos": round(
             (ahora() - inicio).total_seconds(), 1
@@ -2918,6 +3515,7 @@ def escribir_manifiesto(
         # Avisos que antes solo vivían en la consola de una corrida que
         # nadie miraba en vivo (bug confirmado en v11, revisión de Codex).
         "avisos": list(AVISOS),
+        "filas_escritas": len(filas),
         "por_sucursal": {},
     }
 
@@ -2927,7 +3525,9 @@ def escribir_manifiesto(
 
         resumen["por_sucursal"][node_id] = {
             "branch": nodo.branch,
-            "archivo": nodo.archivo,
+            # Sin `archivo`: desde §8 hay UN solo CSV y el nodo es una
+            # columna. Dejar acá el nombre del CSV por sucursal de 1.0.0
+            # apuntaría a un archivo que esta corrida no escribió.
             "mediciones": len(propias),
             "verified": sum(f.price_status == "VERIFIED" for f in propias),
             "unverified": sum(f.price_status == "UNVERIFIED" for f in propias),
@@ -2947,12 +3547,7 @@ def escribir_manifiesto(
     resumen["motivos_fallo_global"] = motivos_fallo_global
     resumen["exit_code"] = codigo_salida
 
-    SALIDA.mkdir(parents=True, exist_ok=True)
-
-    MANIFEST_FILE.write_text(
-        json.dumps(resumen, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    registrar_corrida(resumen)
 
     return codigo_salida
 
@@ -2987,8 +3582,26 @@ def parsear_argumentos() -> argparse.Namespace:
 
     parser.add_argument("--salida", default="",
                         help=(
-                            "Carpeta de salida. Default: "
-                            "<script>/salida/" + MOTOR + "/"
+                            "Raíz del colector. Adentro se crea una carpeta "
+                            "por corrida. Default: <repo>/data/" + MOTOR + "/"
+                        ))
+
+    parser.add_argument("--skus", default="",
+                        help=(
+                            "Lista explícita de sku_id (comas o espacios). "
+                            "Salta el descubrimiento y mide SOLO esos, contra "
+                            f"todos los nodos. Máximo {MAX_SKUS_EXPLICITOS}. "
+                            "Incompatible con --catalogo y --muestra. Un SKU "
+                            "que el catálogo no devuelva se escribe igual, "
+                            "como SKU_NO_ENCONTRADO."
+                        ))
+
+    parser.add_argument("--dry-run", action="store_true", dest="dry_run",
+                        help=(
+                            "Mide e imprime, no escribe NADA: ni CSV, ni "
+                            "manifiesto, ni evidencia cruda. Sirve para "
+                            "consultar un SKU o probar una categoría sin "
+                            "ensuciar la serie."
                         ))
 
     parser.add_argument("--auditoria", type=float, default=5.0,
@@ -3028,9 +3641,6 @@ def parsear_argumentos() -> argparse.Namespace:
                             "sin freno propio, igual que en v12. Default: 0"
                         ))
 
-    parser.add_argument("--reiniciar", action="store_true",
-                        help="Borra los CSV y empieza el histórico de cero.")
-
     parser.add_argument("--modo", choices=["simulation", "orderform"],
                         default="simulation",
                         help="simulation = 1 request. orderform = 3 requests.")
@@ -3065,7 +3675,43 @@ def parsear_argumentos() -> argparse.Namespace:
     parser.add_argument("--canal", default="chrome",
                         help="Canal Playwright: chrome | msedge | chromium.")
 
-    return parser.parse_args()
+    # `--reiniciar` NO existe más, y conviene dejar escrito por qué.
+    #
+    # Borraba los CSV por sucursal para "empezar el histórico de cero", que
+    # tenía sentido cuando la serie era un archivo mutable al que se
+    # apendeaba. Con una carpeta inmutable por corrida (§7) no hay archivo
+    # acumulado que reiniciar: lo único que el flag podría borrar es historia
+    # ya cerrada, corridas que ya se explicaron a sí mismas. Un flag cuyo
+    # único efecto posible es destruir datos pasados no se redefine, se saca.
+    #
+    # "Reiniciar la serie" hoy es empezar a leer desde otra fecha, que es una
+    # decisión del que consulta y no del que extrae. Y si alguien de verdad
+    # quiere el borrón, `rm -rf data/makro_plazavea/` es explícito, está
+    # fuera del motor, y nadie lo escribe por accidente en un martes.
+
+    argumentos = parser.parse_args()
+
+    argumentos.skus = parsear_lista_skus(argumentos.skus)
+
+    if argumentos.skus:
+        # O lista explícita, o descubrimiento. Las dos juntas dejarían la
+        # selección sin una única fuente y el manifiesto no podría decir
+        # honestamente qué eligió esta corrida (§8.1).
+        if argumentos.catalogo or argumentos.muestra:
+            parser.error(
+                "--skus es incompatible con --catalogo y --muestra: "
+                "o se mide una lista explícita, o se descubre el catálogo."
+            )
+
+        if len(argumentos.skus) > MAX_SKUS_EXPLICITOS:
+            parser.error(
+                f"--skus admite hasta {MAX_SKUS_EXPLICITOS} SKUs y se "
+                f"pasaron {len(argumentos.skus)}. Para medir más, descubrí "
+                "el catálogo con --catalogo/--muestra: --skus es para una "
+                "pregunta puntual o para remedir un baseline."
+            )
+
+    return argumentos
 
 
 async def abrir_navegador(playwright, canal: str, headless: bool):
@@ -3101,9 +3747,12 @@ async def main() -> int:
 
     inicio = ahora()
 
-    global RUN_ID, GUARDAR_EVIDENCIA, SALIDA, MANIFEST_FILE
+    global RUN_ID, GUARDAR_EVIDENCIA, SALIDA, DRY_RUN
     RUN_ID = inicio.strftime("run_%Y%m%d_%H%M%S")
-    GUARDAR_EVIDENCIA = not argumentos.sin_evidencia
+    DRY_RUN = argumentos.dry_run
+    # --dry-run apaga la evidencia aunque no se haya pedido --sin-evidencia:
+    # "no escribe nada" no admite excepciones (§8.1).
+    GUARDAR_EVIDENCIA = not argumentos.sin_evidencia and not DRY_RUN
 
     # Estado por-corrida (v13). Estos diccionarios son globales de módulo
     # para que escribir_manifiesto() los lea sin pasarlos por parámetro,
@@ -3127,9 +3776,12 @@ async def main() -> int:
 
     if argumentos.salida:
         SALIDA = Path(argumentos.salida).expanduser().resolve()
-        MANIFEST_FILE = SALIDA / "ultima_corrida.json"
 
-    SALIDA.mkdir(parents=True, exist_ok=True)
+    # La carpeta de la corrida se crea recién al escribir. Con --dry-run no
+    # se crea nunca: una corrida que no deja datos tampoco tiene por qué
+    # dejar carpetas vacías por las que después alguien se pregunte.
+    if not DRY_RUN:
+        SALIDA.mkdir(parents=True, exist_ok=True)
 
     # Aviso de reubicación.
     #
@@ -3138,24 +3790,28 @@ async def main() -> int:
     # iniciativa propia no es tarea de un extractor. Pero callarlo sería
     # peor — quedarían dos CSV con el mismo nombre en dos carpetas y la
     # próxima duda sería cuál de los dos es el bueno.
-    if SALIDA.parent == RAIZ_SALIDA:
-        viejos = [
-            n.archivo for n in NODOS.values() if (RAIZ_SALIDA / n.archivo).exists()
-        ]
+    if RAIZ_SALIDA_LEGADO.exists():
+        viejos = sorted(
+            str(ruta.relative_to(RAIZ_SALIDA_LEGADO))
+            for ruta in RAIZ_SALIDA_LEGADO.rglob("*.csv")
+        )
 
         if viejos:
-            log("AVISO: hay salida de versiones anteriores en la carpeta raíz:")
+            log("AVISO: hay salida del layout 1.0.0 dentro del paquete:")
 
-            for nombre in viejos:
-                log(f"  {RAIZ_SALIDA / nombre}")
+            for nombre in viejos[:10]:
+                log(f"  {RAIZ_SALIDA_LEGADO / nombre}")
 
-            log(f"v{VERSION.rsplit('-', 1)[-1]} escribe en {SALIDA} y no toca esos archivos.")
+            if len(viejos) > 10:
+                log(f"  ... y {len(viejos) - 10} archivos más")
+
+            log(f"1.1.0 escribe en {SALIDA} y NO toca esos archivos.")
             log("")
 
             AVISOS.append(
-                "CSV de versiones anteriores detectados en "
-                f"{RAIZ_SALIDA}: {', '.join(viejos)}. No se tocaron. "
-                f"Esta corrida escribió en {SALIDA}."
+                f"CSV del layout 1.0.0 detectados en {RAIZ_SALIDA_LEGADO} "
+                f"({len(viejos)} archivos). No se tocaron. Esta corrida "
+                f"escribió en {carpeta_corrida()}."
             )
 
     log("=" * 110)
@@ -3163,13 +3819,20 @@ async def main() -> int:
     log("=" * 110)
     log(f"Script     : {Path(__file__).name}")
     log(f"Run ID     : {RUN_ID}   (esquema {SCHEMA_VERSION})")
-    log(f"Motor      : {MOTOR}  ({RETAILER})")
-    log(f"Salida     : {SALIDA}")
+    log(f"Colector   : {MOTOR}  ({RETAILER})")
+    log(
+        "Salida     : "
+        + ("nada (--dry-run: se mide y se imprime)" if DRY_RUN
+           else str(carpeta_corrida()))
+    )
     log(f"Modo       : {argumentos.modo}")
     log(
         "Catálogo   : "
         + (
-            f"descubrimiento cortado en {argumentos.catalogo} SKUs"
+            f"lista explícita de {len(argumentos.skus)} SKUs "
+            "(sin descubrimiento)"
+            if argumentos.skus
+            else f"descubrimiento cortado en {argumentos.catalogo} SKUs"
             if argumentos.catalogo
             else "completo (se recorre todo el árbol)"
         )
@@ -3308,46 +3971,85 @@ async def main() -> int:
                     "Ajustable con --presupuesto-descubrimiento."
                 )
 
-            log("DESCUBRIMIENTO DEL CATÁLOGO")
-            log("-" * 110)
-
-            if presupuesto_descubrimiento:
-                log(
-                    f"Presupuesto reservado para esta fase: "
-                    f"{presupuesto_descubrimiento} de {cliente.tope} "
-                    "requests totales."
-                )
-
-            catalogo = await descubrir_catalogo(
-                cliente,
-                limite=argumentos.catalogo,
-                por_categoria=argumentos.por_categoria,
-                presupuesto_fase=presupuesto_descubrimiento,
-            )
-
-            # ---------------- SELECCIÓN ----------------
-            seleccion = seleccionar(
-                catalogo, argumentos.muestra, argumentos.semilla
-            )
+            # SKUs pedidos por --skus que el catálogo no devolvió. Se
+            # arrastran hasta la salida: cada uno se escribe igual, una fila
+            # por nodo (§8.1). Vacío en modo descubrimiento.
+            ausentes: list[str] = []
 
             SELECCION.clear()
-            SELECCION.update(
-                {
-                    "metodo": (
-                        "hash_md5(semilla:sku_id)"
-                        if argumentos.muestra
-                        else "todo lo descubierto"
-                    ),
-                    "semilla": argumentos.semilla,
-                    "muestra_pedida": argumentos.muestra,
-                    "descubiertos": len(catalogo),
-                    "seleccionados": len(seleccion),
-                }
-            )
+
+            if argumentos.skus:
+                # ------------ SELECCIÓN EXPLÍCITA (§8.1) ------------
+                log("SELECCIÓN EXPLÍCITA — sin descubrimiento")
+                log("-" * 110)
+
+                catalogo, ausentes, sin_resolver = await descubrir_por_skus(
+                    cliente, argumentos.skus
+                )
+                seleccion = catalogo
+
+                SELECCION.update(
+                    {
+                        "modo": "skus_explicitos",
+                        "metodo": "lista explícita en la línea de comandos",
+                        "skus_pedidos": list(argumentos.skus),
+                        # Se preguntó y el catálogo dijo que no: es un dato
+                        # del SKU y lleva fila propia.
+                        "skus_no_encontrados": ausentes,
+                        # Nunca se llegó a preguntar (presupuesto agotado):
+                        # es un dato de la CORRIDA y NO lleva fila.
+                        "skus_sin_resolver": sin_resolver,
+                        "descubiertos": len(catalogo),
+                        "seleccionados": len(seleccion),
+                    }
+                )
+            else:
+                log("DESCUBRIMIENTO DEL CATÁLOGO")
+                log("-" * 110)
+
+                if presupuesto_descubrimiento:
+                    log(
+                        f"Presupuesto reservado para esta fase: "
+                        f"{presupuesto_descubrimiento} de {cliente.tope} "
+                        "requests totales."
+                    )
+
+                catalogo = await descubrir_catalogo(
+                    cliente,
+                    limite=argumentos.catalogo,
+                    por_categoria=argumentos.por_categoria,
+                    presupuesto_fase=presupuesto_descubrimiento,
+                )
+
+                # ---------------- SELECCIÓN ----------------
+                seleccion = seleccionar(
+                    catalogo, argumentos.muestra, argumentos.semilla
+                )
+
+                SELECCION.update(
+                    {
+                        "modo": "descubrimiento",
+                        "metodo": (
+                            "hash_md5(semilla:sku_id)"
+                            if argumentos.muestra
+                            else "todo lo descubierto"
+                        ),
+                        "semilla": argumentos.semilla,
+                        "muestra_pedida": argumentos.muestra,
+                        "descubiertos": len(catalogo),
+                        "seleccionados": len(seleccion),
+                    }
+                )
 
             log("")
             log(
-                f"SELECCIÓN: {len(seleccion)} de {len(catalogo)} SKUs descubiertos"
+                f"SELECCIÓN: {len(seleccion)} SKUs"
+                + (
+                    f" de los {len(argumentos.skus)} pedidos"
+                    + (f", {len(ausentes)} no encontrados" if ausentes else "")
+                    if argumentos.skus
+                    else f" de {len(catalogo)} descubiertos"
+                )
                 + (
                     f"  (hash con semilla {argumentos.semilla} — "
                     "misma semilla, misma muestra)"
@@ -3427,21 +4129,11 @@ async def main() -> int:
                 # columna de contexto.
                 log(f"Aviso: no se pudo refrescar el stock de cadena ({exc}).")
 
-            # ---------------- GUARDIA DE ESQUEMA ----------------
-            archivados = archivar_si_cambio_el_esquema(inicio)
-
-            if archivados:
-                log("")
-                log("AVISO: las columnas cambiaron respecto al CSV existente.")
-                log("El histórico anterior se archivó para no corromperlo:")
-
-                for nombre in archivados:
-                    log(f"  -> {nombre}")
-
-                AVISOS.append(
-                    f"Esquema cambió respecto al CSV existente. Archivado: "
-                    f"{', '.join(archivados)}."
-                )
+            # La GUARDIA DE ESQUEMA de 1.0.0 iba acá. Ya no hace falta:
+            # cada corrida escribe su propio CSV en su propia carpeta, así
+            # que no hay cabecera vieja que un esquema nuevo pueda
+            # desalinear. El razonamiento completo está donde vivía la
+            # función, arriba de escribir_filas().
 
             log("")
             log("MEDICIONES")
@@ -3602,13 +4294,31 @@ async def main() -> int:
             await navegador.close()
 
     # ---------------- SALIDA ----------------
-    rutas = []
+    #
+    # Las filas de los SKUs que se pidieron y el catálogo no devolvió se
+    # agregan ACÁ, después de medir y antes de escribir (§8.1). No pasan por
+    # `medir()` porque no hay nada que medir: no existe el producto. Pero se
+    # escriben igual, una por nodo, porque su ausencia en el CSV sería
+    # indistinguible de no haberlos pedido nunca.
+    if ausentes:
+        momento_ausentes = ahora()
 
-    for node_id, nodo in NODOS.items():
-        propias = [f for f in filas if f.node_id == node_id]
+        for sku_id in ausentes:
+            for nodo in NODOS.values():
+                filas.append(fila_sku_ausente(sku_id, nodo, momento_ausentes))
 
-        if propias:
-            rutas.append(apendear_csv(nodo, propias, argumentos.reiniciar))
+        log("")
+        log(
+            f"{len(ausentes)} SKUs pedidos no existen en el catálogo: se "
+            f"escriben {len(ausentes) * len(NODOS)} filas SKU_NO_ENCONTRADO "
+            f"({', '.join(ausentes)})."
+        )
+
+    # Orden estable (sku_id, node_id): el CSV largo se lee de a pares y dos
+    # corridas se diffean sin ordenar antes.
+    filas.sort(key=lambda f: (f.sku_id, f.node_id))
+
+    ruta_csv = escribir_filas(filas)
 
     codigo_salida = escribir_manifiesto(filas, cliente, argumentos.modo, inicio)
 
@@ -3627,8 +4337,7 @@ async def main() -> int:
             f"Nodo {node_id} {nodo.branch:<14} "
             f"mediciones={len(propias):<4} "
             f"con precio={con_precio:<4} "
-            f"verificados={verificados:<4} "
-            f"-> {nodo.archivo}"
+            f"verificados={verificados:<4}"
         )
 
     # ---- AUDITORÍA ----
@@ -3713,7 +4422,7 @@ async def main() -> int:
                 f"({CONTRATO['con_logistica']}/{CONTRATO['respuestas_ok']})."
             )
             log("Antes de creerle a este dataset, revisa si VTEX cambió el")
-            log("formato de logisticsInfo. La evidencia cruda está en salida/raw/.")
+            log(f"formato de logisticsInfo. La evidencia cruda está en {archivo_evidencia()}.")
             log("!" * 110)
 
     log("")
@@ -3731,10 +4440,19 @@ async def main() -> int:
     log(f"Duración         : {(ahora() - inicio).total_seconds():.0f}s")
     log("")
 
-    for ruta in rutas:
-        log(f"  {ruta}")
+    if DRY_RUN:
+        log("--dry-run: no se escribió nada (ni CSV, ni manifiesto, ni crudo).")
+        log(f"           habrían sido {len(filas)} filas en {carpeta_corrida()}")
+    else:
+        log(f"  {ruta_csv}")
+        log(f"  {archivo_manifiesto()}")
 
-    log(f"  {MANIFEST_FILE}")
+        if GUARDAR_EVIDENCIA and archivo_evidencia().exists():
+            log(f"  {archivo_evidencia()}")
+
+        log(f"  {archivo_indice()}")
+        log(f"  {archivo_ultima()}")
+
     log("=" * 110)
 
     # ---- VEREDICTO FINAL (v13, Prioridad 4) ----
