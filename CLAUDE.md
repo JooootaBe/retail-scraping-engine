@@ -31,8 +31,15 @@ docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 
 CHANGELOG.md                                     released and unreleased changes
 tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
 tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
+ops/                                             operational tools — NOT the engine; they never measure prices
+ops/arbol_categorias.py                          snapshots the category tree and diffs it against the last one
 data/                                            generated output (gitignored, `.gitignore:32`)
 ```
+
+`ops/` is a deliberate boundary, not a folder for leftovers. Anything there runs by hand or by cron, imports
+from the engine and never modifies it, and answers a question *about* the catalog rather than extracting from
+it. `arbol_categorias.py` is the first: it exists because a new category is a commercial signal — someone on
+the other side decided to start selling something — and until now it entered the traversal in silence.
 
 The project exists to build a time series of prices per SKU per branch so a pricing analyst can compare
 branches later in SQL/pandas. **The extractor itself never compares branches and never drops rows** —
