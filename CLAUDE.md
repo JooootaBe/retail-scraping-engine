@@ -25,9 +25,8 @@ public `simulation` / `orderForm` APIs directly (no page scraping, no purchases)
 still **one file**: a single module inside an installable package, with no automated test suite around it.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (5,786 lines, VERSION 2026.08.21-16, SCHEMA_VERSION 4)
-pyproject.toml                                   package `retail-engine` 1.0.0, Python >=3.12, playwright>=1.62.0
-                                                 (version still says 1.0.0 — not bumped for 1.1.0 yet)
+src/retail_engine/collectors/makro_plazavea.py   the engine (6,069 lines, VERSION 2026.08.22-17, SCHEMA_VERSION 4)
+pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
 docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
 CHANGELOG.md                                     released and unreleased changes
 tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
@@ -51,6 +50,7 @@ python3 $MK --version                                        # version + changel
 python3 $MK --catalogo 300 --por-categoria 3 --muestra 100   # normal test run
 python3 $MK --tope 60000                                     # full catalog (slow, deliberate)
 python3 $MK --modo orderform                                 # 3-request flow instead of simulation
+python3 $MK --categoria "/399/"                              # only that branch of the tree
 python3 $MK --skus 10012716,11401644                         # measure an explicit list, no discovery
 python3 $MK --dry-run --skus 10012716                        # measure, print, write nothing
 python3 $MK --salida /otra/ruta                              # write elsewhere
@@ -63,6 +63,9 @@ measured; deterministic hash selection), `--por-categoria N` (max SKUs per subca
 cap per run; 0 = auto), `--intervalo` (seconds between requests, default 1.5), `--reintentos` (429/5xx
 retries, default 3), `--auditoria PCT` (% of measurements cross-checked simulation vs orderForm, default
 5, 0 disables), `--sin-evidencia` (skip archiving raw JSON), `--headed` / `--canal`.
+
+1.2.0 added `--categoria "/399/,/77/"` — see "Guiding principle: scope is chosen, not inherited from
+the tree" below; it is the flag with the most reasoning behind it.
 
 Three flags came with 1.1.0. `--skus <lista>` (max 20) measures an explicit list and skips discovery —
 it is incompatible with `--catalogo` / `--muestra` on purpose, because a run must have exactly one
@@ -203,6 +206,59 @@ Same seed + same catalog = same sample, nothing persisted; and new Makro product
 own. **Every file the engine writes is output. None is read back to decide what to measure.** Don't
 reintroduce an input file to "stabilize" the sample.
 
+## Guiding principle: scope is chosen, not inherited from the tree (v17)
+
+The category tree has **3,401 nodes**, and `descubrir_catalogo` walks them in a fixed order —
+by route — stopping when `--catalogo N` is reached. The fixed order is deliberate and must stay:
+it is what makes discovery reproducible without persisting anything.
+
+But it had a consequence nobody chose. A bounded run always measured the *first* categories of the
+tree — Packs Limpieza, Packs Desayunos, Packs Vinos — and abarrotes could never come up at all.
+So `--catalogo 300` never meant "300 SKUs of the catalog"; it meant "the first 300 that happen to
+appear", a sample biased by an accidental property of how VTEX sorts its own tree. The scope of
+the series was being decided by the tree, not by the analyst. That is what `--categoria` fixes.
+
+`--categoria "/399/,/77/"` restricts the universe before anything is walked. Three things about it
+are load-bearing:
+
+- **The filter runs before the traversal, not after.** This is not an optimisation, it is whether
+  the flag works at all: discarding a category *after* paginating it costs one request per category
+  thrown away — 3,300 categories at `--intervalo 1.5` is ~83 minutes spent to produce nothing.
+  Measured on `/399/` (Limpieza): 47 categories walked, **3,353 skipped without a single request**.
+- **Prefix match by segment, never `startswith` on the string.** Asking for `/39/` must not drag in
+  `399`, which is a different branch entirely. Matching whole segments is also what makes asking for
+  a parent include its children, which is the useful behaviour.
+- **A route that isn't in the tree is an argument error (exit 2), not a warning.** A run that
+  measures zero categories because someone typed `/3999/` would otherwise finish with exit 0 and an
+  empty CSV — indistinguishable from a branch that genuinely ran out of stock. All bad routes are
+  reported together, so someone who passed four and mistyped two doesn't discover it one at a time.
+  The check needs the live tree, so it happens inside discovery rather than in `parsear_argumentos`.
+
+`--categoria` is incompatible with `--skus`: that flag already names exactly what to measure, so
+accepting a filter that changes nothing would imply one was applied. It composes freely with
+`--catalogo` and `--por-categoria`, which keep operating *inside* the restricted universe.
+
+### What `completo` means once scope is restricted
+
+This is the part that can quietly corrupt a conclusion. A filtered run that walks everything it was
+asked to walk is complete — but complete *with respect to the request*, not with respect to Makro's
+catalog. Reading one as the other would let a series built on a single branch be reported later as
+category coverage.
+
+So the manifest separates the two:
+
+- `descubrimiento.alcance` — `CATALOGO_COMPLETO` or `CATEGORIAS_SELECCIONADAS`.
+- `descubrimiento.clasificacion` — `COMPLETO` only for an unfiltered full walk;
+  **`COMPLETO_EN_CATEGORIAS`** when the requested branches were exhausted. Same nothing-is-missing
+  guarantee, different universe, and the name says which.
+- `categoria_filtro`, `categorias_seleccionadas`, `categorias_a_recorrer` — without these the scope
+  of an old run can't be reconstructed: two runs with the same SKU count may have looked at
+  different branches.
+
+`--por-categoria` keeps its older, stronger contract on top of all this: with it set, discovery can
+**never** be marked complete, filtered or not. That flag's promise is "wide sample", and no amount
+of scope restriction turns a sample into a census.
+
 ## Guiding principle: two kinds of stock answer two different questions
 
 `availability` comes from checkout **with the branch's address** ("can this store ship it today?").
@@ -294,6 +350,10 @@ What belongs here is the epistemics, because it is easy to get wrong twice:
    `es_basura`, `es_landing_seo`) — walks the VTEX category tree building each category's full path,
    paginates by page length when the `resources` header is unparseable (v12), and caps SEO landing pages
    (lowercase names like "absolut vodka") at 1 SKU so they don't flood the sample with one product's variants.
+   The full path `aplanar_categorias` already builds is what makes `--categoria` a prefix match rather than
+   a tree re-walk: `filtrar_categorias`, `ruta_bajo` and `normalizar_ruta_categoria` are pure and testable
+   without the network, and the filter is applied to that flat list *before* the loop (see "scope is chosen,
+   not inherited from the tree").
 7. **Selection** — `seleccionar` is the deterministic hash sampling described above; persists nothing.
    `descubrir_por_skus` is the `--skus` path: it resolves an explicit list with batched `fq=skuId:`
    (20 SKUs in 2 requests) and returns three lists, because "asked and the catalog said no"
@@ -343,7 +403,8 @@ More branches, same architecture — most machinery already scales because it it
 - **Grows linearly, needs planning**: requests per run (SKUs × branches, ~×4 worst case) and wall-clock time
   (requests are strictly sequential at `--intervalo`, by design — "respeto al servidor" in the module
   docstring). 2 → 20 branches is roughly a 10x run. Size `--muestra` and `--intervalo` accordingly instead of
-  raising `--tope` blindly.
+  raising `--tope` blindly — and note that `--categoria` is the other lever: at 20 branches, narrowing the
+  universe to the categories that matter commercially beats measuring a wide, shallow slice of everything.
 - **The real risk when onboarding a branch**: a wrong or incomplete `NODOS` entry doesn't error — VTEX simply
   never returns that signature, every row becomes `node_resolved="OTHER"` / `OPERADOR_EXTERNO`, and the branch
   looks "covered" in row counts while contributing zero verified prices. The v13 per-node alarm now warns
@@ -394,7 +455,8 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   columns, known bugs, acceptance criterion and scope. It owns those numbers and definitions; don't restate
   them here, where the two copies would drift apart. Consult it before proposing changes. Its §9 bug table
   is **not** fully cleared: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
-  `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open, and so is
-  `pyproject.toml` still declaring version `1.0.0`.
+  `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open. Its §12 lists
+  `--categorias` as out of scope — that was true for 1.1.0 and stopped being true in 1.2.0, which shipped
+  it as `--categoria`. The document is an inventory of *that* release; don't read it as the current roadmap.
 - `docs/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
   it before re-adding anything this file used to say.
