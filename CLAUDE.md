@@ -22,14 +22,18 @@ branches").
 A single-purpose extractor: it pulls per-branch (sucursal) retail prices from Makro Perú's VTEX-powered
 storefront (`www.makro.plazavea.com.pe`) using Playwright's async `APIRequestContext` to call VTEX's
 public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). The extraction logic is
-still **one file**: a single module inside an installable package, with no automated test suite around it.
+still **one file**: a single module inside an installable package. There is no test *runner* wired up, but
+three test files now exist and run standalone — they cover the pure rules, not the network path.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (6,069 lines, VERSION 2026.08.22-17, SCHEMA_VERSION 4)
+src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.24-20, SCHEMA_VERSION 6)
 pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
 docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
 CHANGELOG.md                                     released and unreleased changes
 tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
+tests/test_precio_mayorista.py                   23 storefront cards — the only EXTERNAL truth in the repo
+tests/test_precio_en_quiebre.py                  the six branches of price_origin, rows built by hand
+tests/test_propiedades_corrida.py                invariants over a real run, replayed from raw.jsonl.gz
 tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
 ops/                                             operational tools — NOT the engine; they never measure prices
 ops/arbol_categorias.py                          snapshots the category tree and diffs it against the last one
@@ -86,8 +90,13 @@ sense when the series was one mutable file being appended to. With one immutable
 no accumulated file to reset, and the only thing the flag could still delete is closed history. A flag
 whose only possible effect is destroying the past does not get redefined — it gets removed.
 
-**There is no lint/test/build tooling wired up in this repo** — `tests/` holds probes and a fixture, not a
-runner. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10
+**There is no lint/test/build tooling wired up in this repo.** The three `tests/test_*.py` files are
+plain scripts: `python3 tests/test_precio_mayorista.py` (23 storefront cards),
+`python3 tests/test_precio_en_quiebre.py` (the six `price_origin` branches, hand-built rows) and
+`python3 tests/test_propiedades_corrida.py` (invariants over a real run, replayed from `raw.jsonl.gz`;
+skips itself when `data/` is empty). Each prints a report and exits 0/1, and pytest collects them too.
+They test the **pure** functions and the wiring around them — nothing there touches the network, so they
+are not a substitute for a small live run. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10
 --auditoria 0`), then reading the console output, `filas.csv` and `run.json` inside the run's own folder
 under `data/makro_plazavea/`. Check the process exit code — it is meaningful (see "Budget exhaustion is a
 global failure").
@@ -165,9 +174,29 @@ If VTEX returned a price, it is written to the CSV — even if logistics validat
 deliberately separate:
 
 - `price` — the **fact** (what VTEX answered)
+- `price_origin` — the **provenance** (`MEDIDO` / `LISTA_SIN_PROMO`)
 - `price_status` — the **judgment** (`VERIFIED` / `VERIFIED_SELLER_RAIZ` / `QUALIFIED` / `UNVERIFIED` / `NO_PRICE`)
 - `logistics_status` — the **why** (`MATCH`, `MATCH_SELLER_RAIZ`, `MATCH_SIN_CONFIRMAR`, `SIN_STOCK`,
   `NO_COVERAGE`, `OPERADOR_EXTERNO`, `MISMATCH_RESOLVED_*`, `HTTP_ERROR`, `EXCEPTION`, ...)
+
+`price_origin` arrived in v20 and is the newest of the four. **VTEX does not evaluate promotions when the
+node has no stock — it returns the list price**, and the engine used to write that number into `price` with
+no way to tell it apart from a quoted one. Measured: all 143 `withoutStock` rows of `run_20260822_020027`
+have `price == list_price` and `discount_pct = 0.00`, against 19.8% promo incidence among in-stock rows.
+The consequences run deeper than one column, and all three are load-bearing:
+
+- `discount_pct` goes **empty** under `LISTA_SIN_PROMO`. `0.00` there claims "this product has no discount"
+  about a promotion nobody evaluated. With stock, `0.00` is a genuine measurement and must survive — the
+  same cell means two different things depending on the origin, which is why the origin is a parameter of
+  `calcular_descuento_pct` and not something it can infer from the numbers.
+- The wholesale step's publication rule (`list_price − descuento >= price` → suppressed) becomes
+  **unevaluable**: with `price == list_price` it is satisfied by arithmetic construction, so 82 of 82
+  in-stock-less rows would have been marked published without measuring anything. The price is still
+  computed (`list_price` is catalog data, the discount comes from the teaser — neither depends on stock);
+  what is withheld is the verdict. That is `BIPRECIO_PUBLICACION_INDETERMINADA`.
+- `clasificar_origen_precio` keys on `availability`, **never** on the `price`/`list_price` relation.
+  `price == list_price` also happens to in-stock rows with no promotion; the stock is the cause and the
+  price equality is its consequence, and a consequence cannot be the criterion.
 
 A row with `price_status=UNVERIFIED` is real signal (that SKU has no coverage from that branch), not noise
 to filter at extraction time. `medir()` and `construir_fila()` never raise on a per-SKU problem — a failed
@@ -275,10 +304,17 @@ not one per SKU) and are not supposed to agree.
 
 `calcular_stock_signal` crosses them into one actionable label:
 - `DISPONIBLE` — the branch has it
-- `QUIEBRE_LOCAL` — branch is out, chain has it — **the row that's worth money**: real demand, visible
-  stockout, competitor-comparable
-- `QUIEBRE_CADENA` — out everywhere
-- `QUIEBRE_LOCAL_CADENA_DESCONOCIDA` — branch is out, chain status unknown
+- `SIN_STOCK_LOCAL_CADENA_CON_STOCK` — branch is out, chain has it — **the row that's worth money**: real
+  demand, visible stockout, competitor-comparable
+- `SIN_STOCK_CADENA` — out everywhere
+- `SIN_STOCK_LOCAL_CADENA_DESCONOCIDA` — branch is out, chain status unknown
+
+These were `QUIEBRE_LOCAL` / `QUIEBRE_CADENA` / `QUIEBRE_LOCAL_CADENA_DESCONOCIDA` until v20. "Quiebre"
+asserts a *temporary* stockout of something the branch normally carries, and that is not what a single
+day's measurement can distinguish from the SKU simply not being in that branch's assortment — one of the
+143 was checked by hand (SKU 11566889), not 143. The new names state what was observed and leave the cause
+unasserted; the series settles it on its own, and that inference belongs to the analyst with 30 days of
+time axis in front of them, not to a cell.
 
 ## Guiding principle: evidence is cheap insurance, verify instead of trusting
 

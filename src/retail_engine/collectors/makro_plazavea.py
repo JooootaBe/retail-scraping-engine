@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.24-19"
+VERSION = "2026.08.24-20"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -187,9 +187,73 @@ VERSION = "2026.08.24-19"
 # un promedio de dos definiciones. Vale también para `bi_umbral` (§6.2, ahora
 # se conserva fuera de COMPLETO) y `descuento_mayorista_pct` (§6.5, base
 # explícita).
-SCHEMA_VERSION = "5"
+#
+# v20 sube a "6" por las dos razones a la vez, que es lo raro del caso.
+# AGREGA una columna (`price_origin`, 78 -> 79) y además CAMBIA EL
+# SIGNIFICADO de dos que ya existían: `discount_pct` pasa a poder ir vacío
+# (antes 0.00 significaba tanto "se evaluó y no había promoción" como "no se
+# evaluó nada"), y `stock_signal` renombra sus tres valores de quiebre. Una
+# fila v19 y una v20 no se pueden apilar bajo la misma cabecera NI leer con
+# el mismo diccionario de valores.
+SCHEMA_VERSION = "6"
 
 CAMBIOS = [
+    "20  el precio en quiebre no es una oferta (TAREA A). Agrega price_origin,"
+    " vacía discount_pct sin stock, corta un falso positivo del bi-precio y"
+    " renombra stock_signal. SCHEMA_VERSION 5 -> 6, 78 -> 79 columnas ·"
+    " EL HECHO: en run_20260822_020027 las 143 filas withoutStock tienen"
+    " price == list_price y discount_pct = 0.00, las 143 sin una excepción."
+    " Entre las filas con stock el 19.8% trae promoción; bajo independencia"
+    " esperaríamos ~28 de esas 143 con descuento y salieron cero"
+    " (probabilidad del orden de 10⁻¹⁴). VTEX no evalúa promociones cuando"
+    " no hay stock en el nodo y devuelve el precio de LISTA; el storefront"
+    " hace lo mismo, en gris y sin botón de compra. Verificado a mano en"
+    " CHIZITOS (Santa Anita) y Aceite de Oliva ARO 2L (Surco) ·"
+    " POR QUÉ AHORA: v18 introdujo la regla list_price − descuento >= price"
+    " -> no se publica. En una fila en quiebre price == list_price, así que"
+    " esa comparación se cumple por construcción aritmética: de las 82 filas"
+    " en quiebre con COMPLETO, 82 saldrían como escalón publicado y 0 como"
+    " suprimido, sin haber medido nada. Antes de v18 el defecto era pasivo;"
+    " ahora es un falso positivo sistemático con dirección conocida ·"
+    " (1) COLUMNA price_origin: MEDIDO (hubo stock, la simulación evaluó"
+    " promociones) / LISTA_SIN_PROMO (no hubo stock, price es el precio de"
+    " lista) / vacío (no se midió). El price SE CONSERVA — los precios nunca"
+    " se descartan; lo que se agrega es la procedencia. La regla mira"
+    " availability, NO la relación price/list_price: price == list_price"
+    " también pasa con stock y sin promoción, y una consecuencia no puede"
+    " ser el criterio ·"
+    " (2) discount_pct VACÍO en LISTA_SIN_PROMO. 0.00 afirma 'no tiene"
+    " descuento' cuando lo que pasó es que no se evaluó ninguno. La"
+    " simetría es el punto: 0.00 con stock es LEGÍTIMO —se evaluó y no"
+    " había— así que la misma celda quiere decir dos cosas según el origen,"
+    " y por eso el origen es un parámetro y no algo deducible de los números ·"
+    " (3) ESTADO NUEVO BIPRECIO_PUBLICACION_INDETERMINADA: sin stock el"
+    " mayorista SE CALCULA igual (list_price es catálogo y el descuento"
+    " viene del teaser, ninguno depende del stock) pero la regla de"
+    " publicación NO SE PUEDE EVALUAR. Se entrega el precio y no se afirma"
+    " su vigencia; descuento_mayorista_pct va vacío porque mide el ahorro"
+    " contra price y ahí price no es el precio de oferta. En enriquecer_fila"
+    " se separan `completo` (el escalón se publica) de `hay_mayorista` (hay"
+    " precio, se publique o no): antes solo existía el primero, así que toda"
+    " fila con precio mayorista afirmaba publicación ·"
+    " (4) stock_signal deja de decir QUIEBRE: SIN_STOCK_LOCAL_CADENA_CON_STOCK,"
+    " SIN_STOCK_CADENA, SIN_STOCK_LOCAL_CADENA_DESCONOCIDA. 'Quiebre' afirma"
+    " un desabastecimiento temporal de algo que la tienda normalmente vende,"
+    " y eso no se midió: puede ser ausencia de surtido. De las 143 se"
+    " verificó UNA a mano (SKU 11566889, Surco lo devuelve: ahí sí era"
+    " quiebre). Una, no 143. El nombre nuevo dice lo observado y deja la"
+    " causa sin afirmar; la serie la resuelve sola con 30 días de eje"
+    " temporal, que es inferencia del analista y no de una celda ·"
+    " (5) QUINTA REGLA DQ_SIN_STOCK_CON_DESCUENTO: fila sin stock con"
+    " sellingPrice < listPrice. Contradice la premisa de LISTA_SIN_PROMO. No"
+    " ocurre hoy (0 de 143) y no se corrige, se avisa ·"
+    " (6) calcular_descuento_pct y clasificar_origen_precio son PURAS, así"
+    " que tests/test_precio_en_quiebre.py construye las seis ramas a mano y"
+    " no toca la red. La extracción de calcular_descuento_pct fue un commit"
+    " aparte, sin cambio de comportamiento, verificado replayando 3174/3174"
+    " filas desde raw.jsonl.gz ·"
+    " NO TOCA la fórmula de v18: test_precio_mayorista.py sigue en 23/23",
+
     "19  la fase de DESCUBRIMIENTO ahora archiva su crudo en raw.jsonl.gz"
     " (TAREA B) · guardar_evidencia solo se llamaba sobre respuestas de"
     " medición, y el descubrimiento es la ÚNICA fuente de CantidadBiPrecioMK,"
@@ -937,6 +1001,32 @@ class Fila:
     presentacion_origen: str = ""
     precio_por_unidad_base: str = ""
     precio_mayorista_por_unidad_base: str = ""
+
+    # --- PROCEDENCIA DEL PRECIO (TAREA A) --------------------------------
+    #
+    #   MEDIDO           hubo stock en la sucursal y la simulación evaluó
+    #                    promociones: `price` es lo que se cobra.
+    #   LISTA_SIN_PROMO  no hubo stock: VTEX no evalúa promociones y
+    #                    devuelve el precio de LISTA. `price` no es una
+    #                    oferta.
+    #   (vacío)          no se midió nada — no hay procedencia que declarar.
+    #
+    # El hecho detrás: en run_20260822_020027 las 143 filas withoutStock
+    # tienen price == list_price y discount_pct = 0.00. Las 143, sin una
+    # excepción. Entre las filas con stock el 19.8% trae promoción; bajo
+    # independencia esperaríamos ~28 de esas 143 con descuento y salieron
+    # cero (probabilidad del orden de 10⁻¹⁴). El storefront hace lo mismo:
+    # precio de lista en gris, sin botón de compra. Verificado a mano en
+    # CHIZITOS (Santa Anita) y en Aceite de Oliva ARO 2L (Surco).
+    #
+    # El `price` SE CONSERVA — los precios nunca se descartan. Lo que se
+    # agrega es la procedencia, que hasta ahora no estaba en ningún lado y
+    # sin la cual un promedio mezcla precios cobrados con precios de lista.
+    #
+    # Va al FINAL del dataclass a propósito: `COLUMNAS` se deriva de este
+    # orden, y meterla junto a `price` —donde semánticamente pertenece—
+    # correría las 78 columnas de golden_v5.csv sin cambiar un solo dato.
+    price_origin: str = ""
 
 
 COLUMNAS = list(Fila().__dict__.keys())
@@ -2923,13 +3013,31 @@ def calcular_stock_signal(availability: str, chain_stock: str) -> str:
     """
     Cruza los dos niveles de stock en una sola señal accionable.
 
-        DISPONIBLE       la sucursal lo tiene
-        QUIEBRE_LOCAL    la sucursal NO lo tiene pero la cadena SÍ   <- oportunidad
-        QUIEBRE_CADENA   no queda en ninguna parte
-        QUIEBRE_LOCAL_?  la sucursal no lo tiene y no sabemos de la cadena
+        DISPONIBLE                          la sucursal lo tiene
+        SIN_STOCK_LOCAL_CADENA_CON_STOCK    la sucursal NO lo tiene, la
+                                            cadena SÍ            <- oportunidad
+        SIN_STOCK_CADENA                    no queda en ninguna parte
+        SIN_STOCK_LOCAL_CADENA_DESCONOCIDA  la sucursal no lo tiene y no
+                                            sabemos de la cadena
 
-    `QUIEBRE_LOCAL` es la fila que vale dinero: el producto existe, hay
-    unidades en la cadena, y esta tienda no las tiene.
+    `SIN_STOCK_LOCAL_CADENA_CON_STOCK` es la fila que vale dinero: el
+    producto existe, hay unidades en la cadena, y esta tienda no las tiene.
+
+    Por qué ya no se llama QUIEBRE (TAREA A)
+    ----------------------------------------
+    "Quiebre" afirma un desabastecimiento TEMPORAL de algo que la sucursal
+    normalmente vende. Eso no es lo que se midió. Un SKU sin stock en un
+    nodo puede estar en quiebre o simplemente no formar parte del surtido de
+    esa tienda, y la medición —una foto de un día— no distingue las dos.
+    De las 143 filas de run_20260822_020027 se verificó UNA a mano (SKU
+    11566889: la búsqueda en Surco lo devuelve, así que ahí sí era quiebre).
+    Una, no 143.
+
+    El nombre nuevo dice exactamente lo observado —no hay stock local, la
+    cadena sí tiene— y deja la causa sin afirmar. La serie la resuelve sola:
+    un SKU que nunca aparece con stock en un nodo durante 30 días es, con
+    alta probabilidad, ausencia de surtido. Esa inferencia es del analista,
+    con el eje del tiempo delante; no de una celda de una sola medición.
     """
 
     if not availability:
@@ -2941,9 +3049,9 @@ def calcular_stock_signal(availability: str, chain_stock: str) -> str:
     try:
         cadena = int(chain_stock)
     except (TypeError, ValueError):
-        return "QUIEBRE_LOCAL_CADENA_DESCONOCIDA"
+        return "SIN_STOCK_LOCAL_CADENA_DESCONOCIDA"
 
-    return "QUIEBRE_LOCAL" if cadena > 0 else "QUIEBRE_CADENA"
+    return "SIN_STOCK_LOCAL_CADENA_CON_STOCK" if cadena > 0 else "SIN_STOCK_CADENA"
 
 
 # ===========================================================================
@@ -3218,10 +3326,52 @@ def leer_price_valid_until(datos: Any, sku_id: str) -> str:
     return ""
 
 
+def clasificar_origen_precio(availability: str, price: str) -> str:
+    """
+    De dónde salió `price`: de una simulación con stock, o del precio de lista.
+
+    Por qué existe
+    --------------
+    VTEX no evalúa promociones cuando no hay stock en el nodo: devuelve el
+    precio de lista. Hasta ahora el motor escribía ese número en `price` sin
+    distinguirlo de un precio realmente cotizado, y `discount_pct = 0.00`
+    afirmaba "este producto no tiene descuento" cuando lo que pasó es que
+    NO SE EVALUÓ ninguna promoción. Vacío ≠ cero (§6.2).
+
+    La regla se apoya en `availability`, no en la relación entre `price` y
+    `list_price`. Eso es deliberado: `price == list_price` también ocurre en
+    filas con stock que simplemente no tienen promoción, y esas dos cosas no
+    son lo mismo. La causa es el stock; la igualdad de precios es su
+    consecuencia, y una consecuencia no puede ser el criterio.
+
+        MEDIDO           availability == "available"
+        LISTA_SIN_PROMO  cualquier otro estado declarado (withoutStock,
+                         cannotBeDelivered, lo que VTEX invente mañana) CON
+                         precio devuelto
+        ""               sin precio o sin availability: no se midió nada, y
+                         declarar una procedencia sería inventarla
+
+    Pura: dos strings entran, un string sale.
+    """
+
+    if not availability or not price:
+        return ""
+
+    return "MEDIDO" if availability == "available" else "LISTA_SIN_PROMO"
+
+
+# Estados de `biprecio_status` que SÍ traen un precio mayorista en la fila.
+# COMPLETO lo trae y además afirma que el escalón se publica;
+# BIPRECIO_PUBLICACION_INDETERMINADA lo trae y no afirma nada sobre su
+# vigencia. Todo lo demás deja las columnas de precio vacías (§6.2).
+ESTADOS_CON_MAYORISTA = {"COMPLETO", "BIPRECIO_PUBLICACION_INDETERMINADA"}
+
+
 def calcular_descuento_pct(
     list_price: Any,
     selling_price: Any,
     unit_multiplier: Any,
+    price_origin: str = "MEDIDO",
 ) -> str:
     """
     Descuento unitario en porcentaje, o vacío si no se puede afirmar.
@@ -3242,7 +3392,22 @@ def calcular_descuento_pct(
 
     Devuelve string porque es lo que va a la celda del CSV, y porque el
     vacío tiene que poder distinguirse de un cero (§6.2).
+
+    `price_origin = LISTA_SIN_PROMO` devuelve VACÍO, y ese es el punto de
+    TAREA A. Sin stock, `price` es el precio de lista: la resta da cero
+    siempre, por construcción aritmética y no por medición. Escribir 0.00
+    ahí afirma "este producto no tiene descuento", que es una afirmación
+    sobre una promoción que nadie evaluó.
+
+    Ojo con la simetría: `0.00` es LEGÍTIMO cuando hay stock. Ahí sí se
+    evaluó la promoción y no había ninguna, que es un hecho medido. La misma
+    celda quiere decir dos cosas distintas según el origen del precio, y por
+    eso el origen es un parámetro y no algo que esta función pueda deducir
+    mirando los números.
     """
+
+    if price_origin == "LISTA_SIN_PROMO":
+        return ""
 
     try:
         lista = float(list_price or 0)
@@ -3263,6 +3428,7 @@ def calcular_mayorista(
     list_price_cents: int | None,
     umbral: int | None,
     descuento: Decimal | None,
+    price_origin: str = "MEDIDO",
 ) -> dict[str, Any]:
     """
     El ÚNICO lugar donde se decide si hay precio mayorista y por qué.
@@ -3295,11 +3461,37 @@ def calcular_mayorista(
     que no existe es el precio. Por eso `bi_umbral` sobrevive (§6.2) y solo
     se vacían las columnas de precio.
 
+    Y de ahí sale la tercera, que es TAREA A:
+
+        si price_origin != MEDIDO:
+            el mayorista SE CALCULA — no depende del stock: `list_price` es
+            dato de catálogo y el descuento viene del teaser
+            pero la regla de publicación NO SE PUEDE EVALUAR, porque `price`
+            no es el precio real de oferta
+            → BIPRECIO_PUBLICACION_INDETERMINADA, con precio mayorista
+
+    Hay que ver por qué esto no podía quedarse como estaba. En una fila sin
+    stock `price == list_price`, así que `list_price − descuento` queda
+    SIEMPRE por debajo de `price` mientras el descuento sea positivo: la
+    comparación de la regla anterior se cumple por construcción aritmética,
+    sin haber medido nada. Medido sobre run_20260822_020027: de las 82 filas
+    en quiebre con biprecio_status = COMPLETO, 82 se marcarían como escalón
+    publicado y 0 como suprimido. Antes de v18 el defecto era pasivo; con la
+    regla de publicación encima es un falso positivo sistemático y con
+    dirección conocida.
+
+    INDETERMINADA no es un grado intermedio de confianza: se sabe el umbral,
+    se sabe el descuento y se sabe el precio mayorista. Lo único que no se
+    sabe es si el escalón está vigente hoy en esa sucursal. Conservar la
+    ambigüedad como ambigüedad es la misma regla que separa
+    MATCH_SIN_CONFIRMAR de MATCH.
+
     Un solo escalón (§1). `CantidadTriPrecioMK` se registra y NO se aplica:
     está declarado en el catálogo y se midió que checkout no lo honra.
 
-    Devuelve el estado SIEMPRE, y los números SOLO cuando el estado es
-    COMPLETO. Esa asimetría es deliberada: el estado explica la celda vacía
+    Devuelve el estado SIEMPRE, y los números solo cuando hay un precio
+    mayorista que declarar (COMPLETO o INDETERMINADA). Esa asimetría es
+    deliberada: el estado explica la celda vacía
     de al lado, así que nunca puede faltar (§6.2 — vacío ≠ cero; un mayorista
     igual al unitario es una mentira que se filtra sola en una hoja de
     cálculo).
@@ -3337,6 +3529,20 @@ def calcular_mayorista(
             # Un "bi-precio" que arranca en 1 unidad no es un bi-precio.
             estado = "INCONSISTENTE"
 
+        elif price_origin != "MEDIDO":
+            # Sin stock, `price` es el precio de lista y no una oferta: la
+            # comparación de abajo compararía el mayorista contra un número
+            # que nadie va a pagar. No se afirma ni que se publica ni que no.
+            #
+            # Ojo: esto NO mira si `price < list_price`. El caso no se
+            # observó nunca (0 de 143 filas en quiebre) pero si apareciera,
+            # la comparación seguiría sin ser evaluable — `price` no sería
+            # el precio de oferta por el solo hecho de haber bajado. Lo que
+            # sí hace ese caso es contradecir la premisa de LISTA_SIN_PROMO,
+            # y por eso lo marca `DQ_SIN_STOCK_CON_DESCUENTO` en vez de
+            # cambiar este veredicto en silencio.
+            estado = "BIPRECIO_PUBLICACION_INDETERMINADA"
+
         elif mayorista_cents >= price_cents:
             # El escalón existe en el catálogo pero no le gana a la promoción
             # unitaria: comprando de a uno ya se paga igual o menos. Makro no
@@ -3351,7 +3557,7 @@ def calcular_mayorista(
         else:
             estado = "COMPLETO"
 
-    if estado != "COMPLETO":
+    if estado not in ESTADOS_CON_MAYORISTA:
         return {
             "estado": estado,
             "descuento": descuento,
@@ -3677,9 +3883,9 @@ def evaluar_calidad(fila: "Fila", item: dict[str, str], producto: Producto) -> s
     """
     Reglas de calidad sobre la fila ya construida.
 
-    Solo tres, y las tres detectan mentiras del dato, no incumplimientos
-    de estilo. Un motor de calidad con veinte reglas ceremoniales sobre un
-    dataset de 200 filas es burocracia; estas tres han fallado de verdad.
+    Pocas, y todas detectan mentiras del dato, no incumplimientos de
+    estilo. Un motor de calidad con veinte reglas ceremoniales sobre un
+    dataset de 200 filas es burocracia; éstas tienen un caso real detrás.
 
         DQ_SKU_DISTINTO   VTEX devolvió un SKU que no pedimos. Si pasa,
                           el precio pertenece a OTRO producto. Ya se
@@ -3694,10 +3900,19 @@ def evaluar_calidad(fila: "Fila", item: dict[str, str], producto: Producto) -> s
                           mal y no sabemos cuál: se avisa, no se corrige
                           (§4).
 
-    La cuarta entra con la misma vara que las otras tres: tiene un caso real
-    detrás y un consumidor concreto. `price_per_unit` es la columna con la
-    que se compara contra otro retailer; si el multiplicador declarado no
+        DQ_SIN_STOCK_CON_DESCUENTO
+                          fila sin stock cuyo `sellingPrice` es MENOR que
+                          `listPrice`. Contradice la premisa de
+                          `price_origin = LISTA_SIN_PROMO` (TAREA A).
+
+    La cuarta entra con la misma vara: tiene un caso real detrás y un
+    consumidor concreto. `price_per_unit` es la columna con la que se
+    compara contra otro retailer; si el multiplicador declarado no
     corresponde al precio, esa comparación sale mal sin que nada lo delate.
+
+    La quinta protege una premisa, que es lo mismo un nivel más arriba: si
+    dejara de valer, dos veredictos del motor pasarían a estar mal y nada
+    lo diría.
 
     Devuelve las que fallaron separadas por "|", o vacío si la fila está
     limpia.
@@ -3722,6 +3937,25 @@ def evaluar_calidad(fila: "Fila", item: dict[str, str], producto: Producto) -> s
 
         if venta == 0 and fila.availability == "available":
             fallos.append("DQ_PRECIO_CERO")
+
+        # Quinta regla, con la misma vara que las otras: un hecho que
+        # contradice una premisa sobre la que el motor decide.
+        #
+        # LISTA_SIN_PROMO se apoya en que sin stock VTEX devuelve el precio
+        # de lista — medido 143/143 en run_20260822_020027. Una fila sin
+        # stock con `sellingPrice < listPrice` dice que en ese caso SÍ se
+        # evaluó una promoción, y entonces `discount_pct` vacío y el
+        # veredicto INDETERMINADA estarían mal para esa fila.
+        #
+        # No se corrige, se avisa: no sabemos cuál de los dos lados miente,
+        # y el motor no puede resolverlo solo. Nunca disparó todavía.
+        if (
+            multiplicador == 1
+            and fila.price_origin == "LISTA_SIN_PROMO"
+            and lista > 0
+            and 0 < venta < lista
+        ):
+            fallos.append("DQ_SIN_STOCK_CON_DESCUENTO")
 
     except (TypeError, ValueError):
         pass
@@ -4149,10 +4383,22 @@ def enriquecer_fila(
     list_price_cents = entero((item or {}).get("listPrice"))
     umbral = entero(producto.bi_umbral)
 
-    veredicto = calcular_mayorista(price_cents, list_price_cents, umbral, descuento)
+    veredicto = calcular_mayorista(
+        price_cents, list_price_cents, umbral, descuento, fila.price_origin
+    )
     completo = veredicto["estado"] == "COMPLETO"
 
     mayorista_cents = veredicto["mayorista_cents"]
+
+    # Dos condiciones distintas, y confundirlas es el bug de TAREA A:
+    #
+    #   completo        el escalón se publica Y hay precio mayorista
+    #   hay_mayorista   hay precio mayorista, se publique o no
+    #
+    # En BIPRECIO_PUBLICACION_INDETERMINADA la segunda es cierta y la
+    # primera no se sabe. Antes solo existía `completo`, así que cualquier
+    # fila con precio mayorista quedaba afirmando que el escalón se publica.
+    hay_mayorista = mayorista_cents is not None
     mayorista = Decimal(mayorista_cents) / 100 if mayorista_cents is not None else None
 
     # BASE EXPLÍCITA (§6.5): el porcentaje mide el AHORRO CONTRA `price` —
@@ -4169,6 +4415,11 @@ def enriquecer_fila(
     # unitaria. Y esta es además la fórmula que la auditoría del mayorista ya
     # usaba sobre el precio medido: hasta ahora una fila auditada y una
     # reconstruida reportaban porcentajes calculados de dos maneras.
+    # `pct` sigue atado a COMPLETO, no a `hay_mayorista`. Mide el AHORRO
+    # CONTRA `price`, y en una fila sin stock `price` es el precio de lista:
+    # el porcentaje saldría contra un número que nadie paga. Se conoce el
+    # precio mayorista y no se conoce contra qué compararlo, así que la
+    # celda va vacía (§6.2) en vez de traer un ahorro de otra definición.
     pct = None
 
     if completo and mayorista_cents is not None and price_cents:
@@ -4193,8 +4444,8 @@ def enriquecer_fila(
         if veredicto["descuento_cents"] is not None
         else ""
     )
-    fila.precio_mayorista = money(mayorista) if completo else ""
-    fila.precio_mayorista_cents = str(mayorista_cents) if completo else ""
+    fila.precio_mayorista = money(mayorista) if hay_mayorista else ""
+    fila.precio_mayorista_cents = str(mayorista_cents) if hay_mayorista else ""
     fila.descuento_mayorista_pct = (
         f"{pct.quantize(CENTAVO)}" if pct is not None else ""
     )
@@ -4203,7 +4454,7 @@ def enriquecer_fila(
     # aplicado: lo reconstruye. `SI` solo puede ponerlo algo que haya medido
     # a qty≥umbral, y hoy eso no existe en el motor. Decir `SI` acá sería
     # inventar evidencia.
-    fila.precio_mayorista_verificado = "NO" if completo else ""
+    fila.precio_mayorista_verificado = "NO" if hay_mayorista else ""
 
     # ---- RÉGIMEN PROMOCIONAL -------------------------------------------
     regimen = leer_regimen(datos)
@@ -4261,7 +4512,10 @@ def enriquecer_fila(
         # `list_price` del precio mayorista, así que acá no hay dato del
         # servidor que leer. Queda dicho para que nadie lo lea como si
         # tuviera el mismo respaldo que la línea de arriba.
-        if completo and mayorista_cents is not None:
+        # Se deriva del mayorista, así que sigue a `hay_mayorista`, no a
+        # `completo`: es el mismo precio dividido, y su vigencia la declara
+        # `biprecio_status` en la columna de al lado.
+        if hay_mayorista:
             fila.precio_mayorista_por_unidad_base = money4(
                 Decimal(mayorista_cents) / 100 / cantidad
             )
@@ -4321,14 +4575,20 @@ def construir_fila(
         item.get("unitMultiplier"),
     )
 
+    # `availability` sube ACÁ, antes del descuento: sin saber si hubo stock
+    # no se puede decir si `price` es una oferta o el precio de lista, y de
+    # eso depende si `discount_pct` es un cero medido o un cero inventado.
+    fila.availability = item.get("availability", "")
+    fila.price_origin = clasificar_origen_precio(fila.availability, fila.price)
+
     # La regla vive en `calcular_descuento_pct`, pura y probable sin red.
     fila.discount_pct = calcular_descuento_pct(
         item.get("listPrice"),
         item.get("sellingPrice"),
         item.get("unitMultiplier"),
+        fila.price_origin,
     )
 
-    fila.availability = item.get("availability", "")
     fila.stock_signal = calcular_stock_signal(fila.availability, fila.chain_stock)
     fila.seller_chain = item.get("sellerChain", "")
 
