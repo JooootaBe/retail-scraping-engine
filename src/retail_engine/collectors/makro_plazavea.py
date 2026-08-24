@@ -3218,6 +3218,46 @@ def leer_price_valid_until(datos: Any, sku_id: str) -> str:
     return ""
 
 
+def calcular_descuento_pct(
+    list_price: Any,
+    selling_price: Any,
+    unit_multiplier: Any,
+) -> str:
+    """
+    Descuento unitario en porcentaje, o vacío si no se puede afirmar.
+
+        (list_price − selling_price) / list_price × 100
+
+    Estaba EMBEBIDA en `construir_fila` como un bloque `try/float` sobre el
+    item crudo de VTEX. Se extrae sin cambiarle una sola regla: mismo orden
+    de guardas, mismo `float`, mismo `:.2f`, mismo vacío ante cualquier
+    problema. La extracción es el punto — la regla no se podía invocar con
+    insumos, así que probarla exigía una respuesta de VTEX al lado, y un
+    test que sale a la red no es un test.
+
+    La guarda del multiplicador es la de 1.0.0 y no se toca: en un producto
+    por peso `listPrice` es por kilo y `sellingPrice` es por pieza, así que
+    restarlos daría un descuento inventado. Solo se calcula cuando ambos
+    precios están en la MISMA base.
+
+    Devuelve string porque es lo que va a la celda del CSV, y porque el
+    vacío tiene que poder distinguirse de un cero (§6.2).
+    """
+
+    try:
+        lista = float(list_price or 0)
+        venta = float(selling_price or 0)
+        multiplicador = float(unit_multiplier or 1)
+
+    except (TypeError, ValueError):
+        return ""
+
+    if multiplicador == 1 and lista > 0 and venta > 0 and lista >= venta:
+        return f"{(lista - venta) / lista * 100:.2f}"
+
+    return ""
+
+
 def calcular_mayorista(
     price_cents: int | None,
     list_price_cents: int | None,
@@ -4281,19 +4321,12 @@ def construir_fila(
         item.get("unitMultiplier"),
     )
 
-    try:
-        lista = float(item.get("listPrice") or 0)
-        venta = float(item.get("sellingPrice") or 0)
-        multiplicador = float(item.get("unitMultiplier") or 1)
-
-        # El descuento solo tiene sentido cuando ambos precios están en
-        # la MISMA base. En un producto por peso, listPrice es por kilo y
-        # sellingPrice es por pieza: restarlos daría un descuento inventado.
-        if multiplicador == 1 and lista > 0 and venta > 0 and lista >= venta:
-            fila.discount_pct = f"{(lista - venta) / lista * 100:.2f}"
-
-    except (TypeError, ValueError):
-        pass
+    # La regla vive en `calcular_descuento_pct`, pura y probable sin red.
+    fila.discount_pct = calcular_descuento_pct(
+        item.get("listPrice"),
+        item.get("sellingPrice"),
+        item.get("unitMultiplier"),
+    )
 
     fila.availability = item.get("availability", "")
     fila.stock_signal = calcular_stock_signal(fila.availability, fila.chain_stock)
