@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.22-18"
+VERSION = "2026.08.24-19"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -190,6 +190,37 @@ VERSION = "2026.08.22-18"
 SCHEMA_VERSION = "5"
 
 CAMBIOS = [
+    "19  la fase de DESCUBRIMIENTO ahora archiva su crudo en raw.jsonl.gz"
+    " (TAREA B) · guardar_evidencia solo se llamaba sobre respuestas de"
+    " medición, y el descubrimiento es la ÚNICA fuente de CantidadBiPrecioMK,"
+    " del teaser del descuento y de los metadatos de campaña: la simulación"
+    " no los devuelve. Medido en run_20260822_020027: 3174 simulation, 158"
+    " orderform_auditoria, 3 simulation_qtyN y CERO respuestas de catálogo —"
+    " la cadena CantidadBiPrecioMK aparecía 0 veces en el archivo ·"
+    " CONSECUENCIA que esto repara: el CSV no podía reproducir su propio"
+    " veredicto. biprecio_status=SIN_DESCUENTO afirma que hubo un umbral"
+    " declarado, y la misma fila lo vacía por §6.2; el umbral de los SKUs"
+    " 10907796, 1062 y 10907803 ya no existe en ninguna fuente local. El"
+    " motor observó un dato, no lo archivó y después lo destruyó ·"
+    " QUÉ SE ARCHIVA: el árbol de categorías (category_tree, 1 registro, es"
+    " lo que permite reconstruir qué universo se recorrió), cada página de"
+    " categoría (category_page, con ruta/nivel/ventana/resources en"
+    " `contexto`) y cada lote de --skus (skus_lookup, con los sku_ids"
+    " pedidos). Se escriben ANTES de juzgar el status: un HTTP 500 es"
+    " justamente lo que uno quiere poder releer sin volver a pedirlo ·"
+    " CÓMO SE FILTRA: campo `tipo` en cada registro, \"catalogo\" o"
+    " \"medicion\". El nombre del método no alcanzaba para separarlos ·"
+    " escribir_evidencia queda como único punto de escritura; las dos"
+    " puertas comparten archivo, guardas (--sin-evidencia, --dry-run) y modo"
+    " de fallo · NO cambia ninguna columna de Fila: SCHEMA_VERSION sigue en"
+    " 5 · NO es recuperable hacia atrás — la corrida del 22 ya perdió ese"
+    " crudo; aplica de la próxima en adelante, y por eso va antes de empezar"
+    " a acumular la serie · Costo: ~123 requests de descubrimiento contra"
+    " ~3174 de medición ·"
+    " PENDIENTE: refrescar_stock_cadena también pega al catálogo y tampoco"
+    " archiva, pero es la fase stock_cadena, no descubrimiento, y sus campos"
+    " sí llegan enteros al CSV",
+
     "18  el precio mayorista se restaba sobre la BASE EQUIVOCADA. Corrige la"
     " fórmula, agrega un estado y sube SCHEMA_VERSION a 5 ·"
     " (1) LA FÓRMULA: precio_mayorista = list_price − descuento, NO"
@@ -1653,6 +1684,11 @@ async def descubrir_catalogo(
         f"{BASE_URL}/api/catalog_system/pub/category/tree/3"
     )
 
+    # El árbol define QUÉ universo se recorrió: sin él archivado no se puede
+    # reconstruir después la decisión de `filtrar_categorias` para esta
+    # corrida. Es un solo registro.
+    guardar_evidencia_catalogo("category_tree", status, arbol)
+
     categorias = aplanar_categorias(arbol) if status < 400 else []
 
     pedidas = list(categorias_pedidas or [])
@@ -1850,6 +1886,25 @@ async def descubrir_catalogo(
                 )
                 log(f"    ✗ {categoria['name'][:34]:<34} {str(exc)[:60]}")
                 break
+
+            # Se archiva ANTES de juzgar la respuesta: un HTTP 500 o un
+            # cuerpo inesperado es exactamente lo que uno quiere poder releer
+            # sin volver a pedirlo. La página trae `CantidadBiPrecioMK` y el
+            # teaser del descuento, que no vuelven a aparecer en ninguna otra
+            # fase.
+            guardar_evidencia_catalogo(
+                "category_page",
+                status,
+                datos,
+                {
+                    "categoria_ruta": categoria["ruta"],
+                    "categoria_nombre": categoria["name"],
+                    "categoria_nivel": categoria["nivel"],
+                    "desde": desde,
+                    "hasta": desde + VENTANA - 1,
+                    "resources": s(cabeceras.get("resources", "")),
+                },
+            )
 
             if status >= 400 or not isinstance(datos, list):
                 stats["categorias_fallidas"] += 1
@@ -2314,6 +2369,16 @@ async def descubrir_por_skus(
             )
             continue
 
+        # Mismo motivo que en `descubrir_catalogo`: este lote es la única
+        # vez que el umbral del bi-precio pasa por el proceso. Se archiva
+        # antes de juzgar el status.
+        guardar_evidencia_catalogo(
+            "skus_lookup",
+            status,
+            datos,
+            {"lote": numero, "de": len(lotes), "sku_ids": list(lote)},
+        )
+
         if status >= 400 or not isinstance(datos, list):
             log(f"  lote {numero}: HTTP {status}.")
             AVISOS.append(
@@ -2609,18 +2674,84 @@ def guardar_evidencia(
     tocar el disco.
     """
 
-    if not RUN_ID or not GUARDAR_EVIDENCIA or DRY_RUN:
-        return
-
-    registro = {
-        "run_id": RUN_ID,
-        "captured_at": ahora().isoformat(timespec="seconds"),
+    escribir_evidencia({
+        "tipo": "medicion",
         "sku_id": producto.sku_id,
         "product_id": producto.product_id,
         "node_id": nodo.node_id,
         "method": metodo,
         "http_status": status,
         "response": datos,
+    })
+
+
+def guardar_evidencia_catalogo(
+    metodo: str,
+    status: int,
+    datos: Any,
+    contexto: dict[str, Any] | None = None,
+) -> None:
+    """
+    Archiva una respuesta cruda de la fase de DESCUBRIMIENTO.
+
+    Por qué existe (TAREA B del brief de tareas bloqueantes)
+    -------------------------------------------------------
+    `guardar_evidencia` solo se llamaba sobre respuestas de MEDICIÓN. Pero
+    el descubrimiento es la ÚNICA fuente de `CantidadBiPrecioMK` (el umbral
+    del bi-precio), del teaser del descuento y de los metadatos de campaña:
+    la simulación no los devuelve. Sin este archivo, esos campos solo
+    existían en `filas.csv`, donde la regla §6.2 los vacía en todo estado
+    distinto de COMPLETO — o sea, el motor observaba un umbral, no lo
+    archivaba, y después lo borraba. Verificado: `CantidadBiPrecioMK`
+    aparecía 0 veces en el `raw.jsonl.gz` de run_20260822_020027, y el
+    umbral de los SKUs 10907796, 1062 y 10907803 no existe ya en ninguna
+    fuente local.
+
+    Consecuencia estructural que esto repara: el CSV no podía reproducir su
+    propio veredicto (`biprecio_status = SIN_DESCUENTO` afirma que hubo un
+    umbral declarado, y la misma fila lo vació). Con el crudo del catálogo
+    archivado, la salida del motor vuelve a ser reconstruible desde la
+    evidencia — igual que ya lo era todo lo que toca la medición.
+
+    NO es recuperable hacia atrás: aplica de esta corrida en adelante.
+
+    Volumen: ~123 requests de descubrimiento contra ~3174 de medición en una
+    corrida normal. El costo en disco es marginal.
+
+    El registro lleva `tipo = "catalogo"` para poder separarlo de las
+    respuestas de medición sin adivinar por el nombre del método.
+
+    `contexto` guarda QUÉ se preguntó (la categoría y la ventana de
+    paginado, o el lote de SKUs). Sin eso, dos páginas de la misma
+    categoría son indistinguibles al releer el archivo. No lleva `sku_id`
+    ni `node_id` porque una respuesta de catálogo no es de un SKU ni de un
+    nodo: rellenar esos campos afirmaría algo que no se midió.
+    """
+
+    escribir_evidencia({
+        "tipo": "catalogo",
+        "method": metodo,
+        "http_status": status,
+        "contexto": contexto or {},
+        "response": datos,
+    })
+
+
+def escribir_evidencia(registro: dict[str, Any]) -> None:
+    """
+    Escribe una línea en el JSONL comprimido de la corrida.
+
+    Único punto de escritura de la evidencia: medición y catálogo comparten
+    archivo, guardas y modo de fallo. Se separan por el campo `tipo`.
+    """
+
+    if not RUN_ID or not GUARDAR_EVIDENCIA or DRY_RUN:
+        return
+
+    linea = {
+        "run_id": RUN_ID,
+        "captured_at": ahora().isoformat(timespec="seconds"),
+        **registro,
     }
 
     # §7: nombre fijo dentro de la carpeta de la corrida. El `raw/<fecha>/`
@@ -2632,7 +2763,7 @@ def guardar_evidencia(
 
     try:
         with gzip.open(archivo, "at", encoding="utf-8") as salida:
-            salida.write(json.dumps(registro, ensure_ascii=False) + "\n")
+            salida.write(json.dumps(linea, ensure_ascii=False) + "\n")
     except Exception as exc:
         # La evidencia es valiosa, pero no vale perder la corrida por ella.
         log(f"      aviso: no se pudo guardar evidencia ({type(exc).__name__})")
