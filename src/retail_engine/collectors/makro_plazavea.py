@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.22-17"
+VERSION = "2026.08.22-18"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -176,9 +176,52 @@ VERSION = "2026.08.22-17"
 # misma tabla, y con una carpeta inmutable por corrida cada uno queda
 # legible por separado; la capa de consolidación usa esta columna para
 # decidir qué puede unir con qué.
-SCHEMA_VERSION = "4"
+#
+# v18 sube a "5" SIN agregar ni renombrar una sola columna, y es el caso que
+# esta constante existe para cubrir. `precio_mayorista` CAMBIA DE SIGNIFICADO:
+# hasta v17 era `price − descuento` (mal) y desde v18 es `list_price −
+# descuento`, y donde el escalón no le gana a la promoción unitaria ahora va
+# vacío. Un mismo número en la misma columna quiere decir dos cosas distintas
+# según la época. La serie histórica va a tener filas de las dos conviviendo:
+# sin este bump no hay forma de separarlas, y un promedio que las mezcle es
+# un promedio de dos definiciones. Vale también para `bi_umbral` (§6.2, ahora
+# se conserva fuera de COMPLETO) y `descuento_mayorista_pct` (§6.5, base
+# explícita).
+SCHEMA_VERSION = "5"
 
 CAMBIOS = [
+    "18  el precio mayorista se restaba sobre la BASE EQUIVOCADA. Corrige la"
+    " fórmula, agrega un estado y sube SCHEMA_VERSION a 5 ·"
+    " (1) LA FÓRMULA: precio_mayorista = list_price − descuento, NO"
+    " price − descuento. Estuvo mal seis semanas porque donde no hay"
+    " promoción unitaria price == list_price y las dos fórmulas dan lo"
+    " mismo: 2021 de las 2328 filas COMPLETO de run_20260822_020027 no"
+    " tenían promo, o sea que el bug era invisible en el 87% del dataset y"
+    " la auditoría de 3 SKUs de §11 cayó en la parte invisible ·"
+    " (2) ESTADO NUEVO BIPRECIO_SUPERADO_POR_PROMO: si"
+    " list_price − descuento >= price, el escalón NO se publica ni se cobra"
+    " — la promoción unitaria le gana. precio_mayorista,"
+    " precio_mayorista_cents, descuento_mayorista_pct y"
+    " precio_mayorista_por_unidad_base van vacíos; el umbral se conserva ·"
+    " (3) §6.2 REESCRITA: bi_umbral se vacía SOLO si el catálogo no lo"
+    " declara. Vaciarlo en todo estado != COMPLETO destruía evidencia real"
+    " en SIN_DESCUENTO (236 filas) y en el estado nuevo (233): ahí el umbral"
+    " se conoce, lo que falta es el precio ·"
+    " (4) descuento_mayorista_pct con BASE EXPLÍCITA (§6.5): ahorro contra"
+    " price, no descuento sobre list_price. Antes daba igual; con la base"
+    " corregida difiere en 307 filas. Es además la fórmula que la auditoría"
+    " ya aplicaba al precio medido, así que deja de haber dos maneras de"
+    " calcular la misma columna ·"
+    " (5) SCHEMA_VERSION 4 -> 5 sin tocar una columna: precio_mayorista"
+    " cambia de SIGNIFICADO y la serie va a tener filas de las dos épocas"
+    " conviviendo ·"
+    " (6) verdad EXTERNA por primera vez: tests/test_precio_mayorista.py"
+    " contra 23 fichas capturadas a mano del storefront. La fórmula vieja"
+    " acierta 11/23, ésta 23/23. Todo otro fixture del proyecto sale de la"
+    " misma API que se está midiendo ·"
+    " (7) el crudo pagó el descubrimiento: raw.jsonl.gz tenía ListPrice en"
+    " cada respuesta de simulation, así que reinterpretar la auditoría"
+    " costó cero requests",
     "17  --categoria: el alcance de la corrida lo decide el usuario, no el"
     " orden del árbol. No agrega columnas: SCHEMA_VERSION sigue en 4 ·"
     " (1) el problema: el árbol tiene ~3.400 categorías y descubrir_catalogo"
@@ -3046,13 +3089,40 @@ def leer_price_valid_until(datos: Any, sku_id: str) -> str:
 
 def calcular_mayorista(
     price_cents: int | None,
+    list_price_cents: int | None,
     umbral: int | None,
     descuento: Decimal | None,
 ) -> dict[str, Any]:
     """
     El ÚNICO lugar donde se decide si hay precio mayorista y por qué.
 
-        precio_mayorista_cents = price_cents − descuento_monto_cents
+        precio_mayorista_cents = list_price_cents − descuento_monto_cents
+
+    LA BASE ES `ListPrice`, NO `Price` (corregido en v18). Hasta v17 esta
+    función restaba sobre `Price` y estuvo mal seis semanas sin que nada lo
+    delatara: donde NO hay promoción unitaria `price == list_price` y las dos
+    fórmulas colapsan en el mismo número. De las 2328 filas COMPLETO de
+    `run_20260822_020027`, 2021 no tenían promoción unitaria — el bug era
+    invisible en el 87% del dataset, y la auditoría de 3 SKUs de §11 cayó casi
+    entera en la parte invisible: 2 sin promo pasaron, 1 con promo falló y se
+    le echó la culpa al redondeo. La fórmula nunca estuvo probada donde podía
+    fallar.
+
+    Lo que la prueba hoy es verdad EXTERNA, no otra respuesta de la misma API:
+    23 fichas capturadas a mano del storefront
+    (`tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv`). La
+    fórmula vieja acierta 11/23; ésta, 23/23.
+
+    De ahí sale la segunda regla, que antes no existía:
+
+        si list_price − descuento >= price:
+            el escalón NO se publica ni se cobra
+            → la promoción unitaria le gana al escalón mayorista
+            → BIPRECIO_SUPERADO_POR_PROMO, sin precio mayorista
+
+    Ese estado no es un hueco en el dato: el umbral se conoce y es real, lo
+    que no existe es el precio. Por eso `bi_umbral` sobrevive (§6.2) y solo
+    se vacían las columnas de precio.
 
     Un solo escalón (§1). `CantidadTriPrecioMK` se registra y NO se aplica:
     está declarado en el catálogo y se midió que checkout no lo honra.
@@ -3083,17 +3153,32 @@ def calcular_mayorista(
         # marca. Redondear acá sería inventar medio céntimo por unidad.
         estado = "INCONSISTENTE"
 
+    elif list_price_cents is None:
+        # Hay umbral y descuento declarados, pero falta la base sobre la que
+        # se resta. NO se cae de vuelta a `price_cents`: ese atajo ES el bug
+        # que v18 corrige, y lo peor que tenía era que no se notaba.
+        estado = "INCONSISTENTE"
+
     else:
-        mayorista_cents = price_cents - descuento_cents
+        mayorista_cents = list_price_cents - descuento_cents
 
-        inconsistente = (
-            mayorista_cents <= 0
-            or mayorista_cents > price_cents
+        if mayorista_cents <= 0 or umbral < 2:
             # Un "bi-precio" que arranca en 1 unidad no es un bi-precio.
-            or umbral < 2
-        )
+            estado = "INCONSISTENTE"
 
-        estado = "INCONSISTENTE" if inconsistente else "COMPLETO"
+        elif mayorista_cents >= price_cents:
+            # El escalón existe en el catálogo pero no le gana a la promoción
+            # unitaria: comprando de a uno ya se paga igual o menos. Makro no
+            # lo imprime en la ficha y checkout no lo cobra, así que
+            # publicarlo acá sería ofrecer un precio que nadie puede pagar.
+            #
+            # Con `>=` y no `>`: empatar tampoco es un escalón. Un mayorista
+            # idéntico al unitario es la mentira que el docstring de arriba
+            # dice que se filtra sola en una hoja de cálculo.
+            estado = "BIPRECIO_SUPERADO_POR_PROMO"
+
+        else:
+            estado = "COMPLETO"
 
     if estado != "COMPLETO":
         return {
@@ -3107,7 +3192,7 @@ def calcular_mayorista(
         "estado": estado,
         "descuento": descuento,
         "descuento_cents": descuento_cents,
-        "mayorista_cents": price_cents - descuento_cents,
+        "mayorista_cents": list_price_cents - descuento_cents,
     }
 
 
@@ -3887,23 +3972,48 @@ def enriquecer_fila(
         descuento = dec(producto.descuento_catalogo)
 
     price_cents = entero(fila.price_cents)
+    # La base del escalón es `ListPrice`, no `Price` (v18). Se lee del item
+    # en céntimos crudos, igual que `price_cents`, para no ir y volver por el
+    # string en soles.
+    list_price_cents = entero((item or {}).get("listPrice"))
     umbral = entero(producto.bi_umbral)
 
-    veredicto = calcular_mayorista(price_cents, umbral, descuento)
+    veredicto = calcular_mayorista(price_cents, list_price_cents, umbral, descuento)
     completo = veredicto["estado"] == "COMPLETO"
 
     mayorista_cents = veredicto["mayorista_cents"]
     mayorista = Decimal(mayorista_cents) / 100 if mayorista_cents is not None else None
 
+    # BASE EXPLÍCITA (§6.5): el porcentaje mide el AHORRO CONTRA `price` —
+    # cuánto deja de pagar por unidad quien compra el escalón en vez de
+    # comprar de a uno. NO es el descuento sobre `list_price`.
+    #
+    # Es la pregunta que un analista de pricing hace de verdad: `list_price`
+    # es un precio que hoy nadie paga si hay promoción unitaria encima, así
+    # que un porcentaje medido contra él exagera el beneficio del escalón.
+    #
+    # Hasta v17 daba igual —con la base vieja el ahorro ERA el descuento— y
+    # por eso podía escribirse como `descuento / price`. Con la base
+    # corregida son dos números distintos en toda fila con promoción
+    # unitaria. Y esta es además la fórmula que la auditoría del mayorista ya
+    # usaba sobre el precio medido: hasta ahora una fila auditada y una
+    # reconstruida reportaban porcentajes calculados de dos maneras.
     pct = None
 
-    if veredicto["descuento_cents"] is not None and price_cents:
-        pct = Decimal(veredicto["descuento_cents"]) / Decimal(price_cents) * 100
+    if completo and mayorista_cents is not None and price_cents:
+        pct = Decimal(price_cents - mayorista_cents) / Decimal(price_cents) * 100
 
-    # Sin COMPLETO el umbral tampoco se publica: un umbral suelto al lado de
-    # un precio invita a que alguien arme el mayorista a mano y a que le
-    # salga distinto que acá.
-    fila.bi_umbral = str(umbral) if (completo and umbral is not None) else ""
+    # §6.2 REESCRITA (v18): el umbral se vacía SOLO si el catálogo no lo
+    # declara. Antes se vaciaba en todo estado != COMPLETO, y eso destruía
+    # evidencia real: en SIN_DESCUENTO (236 filas de run_20260822_020027) y en
+    # BIPRECIO_SUPERADO_POR_PROMO (233) el umbral se conoce y es un hecho del
+    # catálogo — lo que no existe es el precio. Vaciar el precio no puede
+    # obligar a vaciar el umbral.
+    #
+    # El riesgo que la regla vieja atacaba —alguien arma el mayorista a mano
+    # y le sale distinto— sigue cubierto por `biprecio_status` en la columna
+    # de al lado, que dice exactamente por qué no hay precio.
+    fila.bi_umbral = str(umbral) if umbral is not None else ""
     tri = entero(producto.tri_umbral)
     fila.tri_umbral_declarado = str(tri) if tri is not None else ""
     fila.descuento_monto = money(veredicto["descuento"])
@@ -3915,7 +4025,7 @@ def enriquecer_fila(
     fila.precio_mayorista = money(mayorista) if completo else ""
     fila.precio_mayorista_cents = str(mayorista_cents) if completo else ""
     fila.descuento_mayorista_pct = (
-        f"{pct.quantize(CENTAVO)}" if (completo and pct is not None) else ""
+        f"{pct.quantize(CENTAVO)}" if pct is not None else ""
     )
     fila.biprecio_status = veredicto["estado"]
     # El motor mide a qty=1 SIEMPRE, así que nunca observa el mayorista

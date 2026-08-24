@@ -1,0 +1,24 @@
+sku_id,product_name,fecha_observacion,contexto_nodo,price_api,list_price_api,descuento_api,bi_umbral_api,biprecio_status_motor_20260822,precio_unitario_ficha,precio_lista_ficha,umbral_ficha,precio_escalon_ficha,publica_escalon,mayorista_esperado,fuente
+90537,Sopa Ramen NISSIN Sabor a Pollo Bolsa 85g,2026-08-22,no_declarado,1.90,2.60,0.80,6,COMPLETO,1.90,2.60,6,1.80,SI,1.80,captura_ficha_pdp
+11566676,Durazno en Mitades en Almíbar ARO Lata 820g,2026-08-22,no_declarado,5.90,6.90,1.40,3,COMPLETO,5.90,6.90,3,5.50,SI,5.50,captura_ficha_pdp
+699,Duraznos en Almíbar ARICA Lata 820g,2026-08-22,no_declarado,8.70,10.30,1.80,3,COMPLETO,8.70,10.30,3,8.50,SI,8.50,captura_ficha_pdp
+11566220,Bombón ARCOR Privilegio Paquete 480g,2026-08-22,no_declarado,24.60,24.60,9.40,2,COMPLETO,24.60,,2,15.20,SI,15.20,captura_ficha_pdp
+62,Galletas Integrales COSTA con Salvado de Trigo Paquete 6un,2026-08-22,no_declarado,5.50,5.50,2.10,2,COMPLETO,5.50,,2,3.40,SI,3.40,captura_ficha_pdp
+11907502,Bombones de Chocolate Mini BON O BON Multipack Bolsa 366g,2026-08-22,no_declarado,24.90,24.90,9.35,2,COMPLETO,24.90,,2,15.55,SI,15.55,captura_ficha_pdp
+10012708,Chocolate BESOS DE MOZA Clásico Caja 20un x 24g,2026-08-22,no_declarado,20.30,20.30,1.00,2,COMPLETO,20.30,,2,19.30,SI,19.30,captura_ficha_pdp
+10028415,Palillo SIBARITA Bolsa 6un 57g,2026-08-22,no_declarado,2.40,2.40,0.20,2,COMPLETO,2.40,,2,2.20,SI,2.20,captura_ficha_pdp
+11580127,Aceite Vegetal ARO Botella 900ml,2026-08-22,no_declarado,5.60,5.60,0.30,20,COMPLETO,5.60,,20,5.30,SI,5.30,captura_ficha_pdp
+597,Aceite de Soya SOYA Botella 900ml,2026-08-22,no_declarado,5.70,5.70,0.20,20,COMPLETO,5.70,,20,5.50,SI,5.50,captura_ficha_pdp
+11434450,Mezcla Lista para Apanar MAGGI Sobre 80g,2026-08-22,no_declarado,2.50,2.50,0.35,15,COMPLETO,2.50,,15,2.15,SI,2.15,captura_ficha_pdp
+10012680,Aceite de Oliva HUERTO ALAMEIN Extra Virgen Botella 2L,2026-08-22,no_declarado,88.00,118.50,0.10,3,COMPLETO,88.00,118.50,,,NO,,captura_ficha_pdp
+43789,Chocolate SAPITO Mini Bolsa 50un,2026-08-22,no_declarado,10.30,16.50,5.15,2,COMPLETO,10.30,16.50,,,NO,,captura_ficha_pdp
+10035508,Aceite de Oliva Extra Virgen OLIVOS DEL SUR Caja 4L,2026-08-22,no_declarado,229.90,233.90,0.20,3,COMPLETO,229.90,233.90,,,NO,,captura_ficha_pdp
+11566421,Aceite de Oliva EL OLIVAR Extra Virgen Galonera 3.785L,2026-08-22,no_declarado,168.00,239.90,0.30,3,COMPLETO,168.00,239.90,,,NO,,captura_ficha_pdp
+11566889,Aceite de Oliva Extravirgen ARO Botella 2L,2026-08-22,359,71.92,89.90,2.00,2,COMPLETO,71.92,89.90,,,NO,,captura_ficha_pdp
+12413445,Gomitas Masticables MOGUL Confitado Display 16un Bolsa 30g,2026-08-22,no_declarado,39.60,39.60,,,SIN_BIPRECIO,39.60,,,,NO,,captura_ficha_pdp
+10907796,Crema de Ají B&D Caja 240un,2026-08-22,no_declarado,55.00,55.00,,,SIN_DESCUENTO,55.00,,,,NO,,captura_ficha_pdp
+1062,Sazonador AJI-NO-MOTO Umami Glutamato de Sodio Bolsa 500Gr,2026-08-22,no_declarado,11.10,11.10,,,SIN_DESCUENTO,11.10,,,,NO,,captura_ficha_pdp
+10907803,Fideos MOLITALIA Linguini Bolsa 450g,2026-08-22,cusco,3.00,3.00,,,SIN_DESCUENTO,3.00,,,,NO,,captura_ficha_pdp
+10012678,Arroz CHAPARRI Extra Saco 10kg,2026-08-22,no_declarado,46.90,46.90,,,SIN_BIPRECIO,46.90,,,,NO,,captura_ficha_pdp
+11566376,Arroz Extra Añejo FARAÓN Saco 50Kg,2026-08-22,no_declarado,197.00,212.90,,,SIN_BIPRECIO,197.00,212.90,,,NO,,captura_ficha_pdp
+11574962,CHIZITOS Sabor a Queso Tira 12 Bolsas 18g c/u,2026-08-22,360,6.00,6.00,,,SIN_BIPRECIO,4.08,6.00,,,NO,,captura_ficha_pdp
