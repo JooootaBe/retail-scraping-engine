@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.24-20"
+VERSION = "2026.08.25-21"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -198,6 +198,29 @@ VERSION = "2026.08.24-20"
 SCHEMA_VERSION = "6"
 
 CAMBIOS = [
+    "21  alcanzar el total declarado no es truncamiento (corrección 1)."
+    " Extrae evaluar_fin_de_paginado como función pura. SCHEMA_VERSION"
+    " sigue en 6: no cambia ninguna columna ·"
+    " EL HECHO: run_20260822_020027 y run_20260824_154502 quedaron las dos"
+    " clasificadas INCOMPLETO_NO_PLANEADO por TRUNCAMIENTO_VTEX con un"
+    " único fallo, la categoría 'Fideos Largos', y el mensaje se"
+    " contradecía a sí mismo: 'quedó truncada en 50 productos: alcanzó el"
+    " techo de paginado (~2450)'. 50 no es 2450 ·"
+    " LA CAUSA: el techo efectivo es min(total, TOPE_VTEX), pero al"
+    " alcanzarlo se marcaba truncada por el solo hecho de que la última"
+    " página viniera llena. Cuando el total declarado es múltiplo exacto de"
+    " VENTANA (50 en Fideos Largos) la última página vuelve llena por"
+    " aritmética, no por corte: la página corta que confirmaría el final no"
+    " puede existir. categorias_resources_desconocido = 0 confirma que el"
+    " total sí se conocía ·"
+    " EL ARREGLO: distinguir de qué techo se trata. Solo el de VTEX indica"
+    " truncamiento — ahí hay productos que existen y no se pudieron pedir;"
+    " llegar al total declarado es el final legítimo. Los otros tres casos"
+    " no se mueven: total > TOPE con página llena sigue truncada, total"
+    " desconocido con página llena sigue truncada (bug de v11, la cabecera"
+    " ausente leída como total=0), y una página corta nunca lo fue ·"
+    " La decisión sale del bucle a una función pura para poder probarla sin"
+    " red: tests/test_truncamiento.py cubre los cuatro casos a mano.",
     "20  el precio en quiebre no es una oferta (TAREA A). Agrega price_origin,"
     " vacía discount_pct sin stock, corta un falso positivo del bi-precio y"
     " renombra stock_signal. SCHEMA_VERSION 5 -> 6, 78 -> 79 columnas ·"
@@ -1453,6 +1476,50 @@ def total_desde_resources(recursos: str) -> int | None:
         return None
 
 
+def evaluar_fin_de_paginado(
+    desde: int,
+    total: int,
+    total_conocido: bool,
+    pagina_corta: bool,
+    tope_vtex: int,
+) -> tuple[bool, bool]:
+    """
+    Decide, tras leer una página, si el paginado termina y si quedó truncado.
+
+    Devuelve `(terminar, truncada)`. Pura: es la decisión que antes vivía
+    embebida en el bucle de `descubrir_catalogo` y no se podía probar sin
+    red.
+
+    El techo efectivo es el menor entre el total declarado (cuando la
+    cabecera `resources` se pudo leer) y lo que VTEX deja paginar. Pero
+    llegar al techo NO significa lo mismo en los dos casos, y confundirlos
+    es el bug que esta función existe para cerrar: `run_20260822_020027` y
+    `run_20260824_154502` quedaron clasificadas INCOMPLETO_NO_PLANEADO por
+    una sola categoría, "Fideos Largos", con total declarado 50 — un
+    múltiplo exacto de la ventana. La última página volvió llena, nunca
+    hubo página corta, `desde` alcanzó el techo y se marcó truncada aunque
+    se hubiera leído la categoría entera. El mensaje se delataba solo:
+    "quedó truncada en 50 productos: alcanzó el techo de paginado (~2450)".
+
+    Solo el techo de VTEX indica truncamiento, porque solo ahí hay
+    productos que existen y no se pudieron pedir. Alcanzar el total
+    declarado es el final legítimo de la categoría: no falta nada, y la
+    página corta que lo confirmaría no puede existir cuando el total es
+    múltiplo de la ventana.
+    """
+
+    techo = min(total, tope_vtex) if total_conocido else tope_vtex
+
+    if desde >= techo:
+        # Sin total legible el único techo disponible es el de VTEX; con
+        # total legible, solo es el de VTEX si el total lo supera.
+        techo_de_vtex = (not total_conocido) or total > tope_vtex
+
+        return True, (not pagina_corta and techo_de_vtex)
+
+    return pagina_corta, False
+
+
 def aplanar_categorias(
     arbol: Any,
     prefijo: str = "",
@@ -2036,26 +2103,23 @@ async def descubrir_catalogo(
             pagina_corta = len(datos) < VENTANA
             desde += VENTANA
 
-            # Techo efectivo de esta categoría. Si conocemos el total real
-            # (cabecera `resources` legible), es el menor entre ese total y
-            # lo que VTEX deja paginar. Si NO lo conocemos — bug confirmado
-            # en v11: la cabecera ausente se leía como total=0 y la
-            # categoría se truncaba a la primera página en silencio — el
-            # único límite disponible es el techo de paginado de VTEX:
-            # seguimos pidiendo páginas mientras vengan llenas, en vez de
-            # asumir un total de cero.
-            techo = min(total, TOPE_VTEX) if total_conocido else TOPE_VTEX
+            # El techo efectivo y qué significa alcanzarlo viven en
+            # `evaluar_fin_de_paginado`, pura y probada aparte: la
+            # distinción entre "llegué al total declarado" (final legítimo)
+            # y "llegué al tope de paginado de VTEX" (hay productos que no
+            # pude pedir) es la que se había perdido acá adentro.
+            terminar, truncada_aqui = evaluar_fin_de_paginado(
+                desde=desde,
+                total=total,
+                total_conocido=total_conocido,
+                pagina_corta=pagina_corta,
+                tope_vtex=TOPE_VTEX,
+            )
 
-            if desde >= techo:
-                # Llegamos al techo sin ver una página corta antes: no hay
-                # forma de saber si eso fue el final real de la categoría o
-                # si el techo (de VTEX o nuestro, cuando el total no se
-                # conocía) cortó antes de tiempo.
-                if not pagina_corta:
-                    truncada = True
-                break
+            if truncada_aqui:
+                truncada = True
 
-            if pagina_corta:
+            if terminar:
                 break
 
         if resources_desconocido:
