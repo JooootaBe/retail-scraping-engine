@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.25-21"
+VERSION = "2026.08.25-22"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -198,6 +198,56 @@ VERSION = "2026.08.25-21"
 SCHEMA_VERSION = "6"
 
 CAMBIOS = [
+    "22  la auditoría del mayorista esperaba el número equivocado, no"
+    " propagaba su veredicto y muestreaba del lado ciego (corrección 2)."
+    " SCHEMA_VERSION sigue en 6: no cambia ninguna columna ·"
+    " (2a) DOS EXPECTATIVAS, NO UNA. Con la fórmula de v18, qué debe cobrar"
+    " VTEX a qty=umbral depende de lo que la fila afirme: un COMPLETO debe"
+    " cobrar list_price − descuento, y un BIPRECIO_SUPERADO_POR_PROMO debe"
+    " cobrar price, porque su escalón no aplica. Contrastar los dos contra"
+    " el mayorista reconstruido reporta discrepancias inexistentes. Es lo"
+    " que le pasó al SKU 10012680 en run_20260822_020027: se remidió a"
+    " qty=umbral, VTEX cobró 88.00 —exactamente su price, con list_price"
+    " 118.50— y salió marcado DQ_MAYORISTA_DISCREPA cuando lo que pasó es"
+    " que la promoción unitaria le ganaba al escalón. La auditoría ahora"
+    " VERIFICA esa afirmación en vez de contradecirla, y los SUPERADO"
+    " entran a la muestra: ese estado afirma que el escalón no se cobra y"
+    " era la única afirmación del bi-precio que nada verificaba."
+    " BIPRECIO_PUBLICACION_INDETERMINADA queda EXCLUIDA — sin stock VTEX no"
+    " cotiza a ninguna cantidad, así que no hay nada que preguntar ·"
+    " (2b) EL VEREDICTO SE PROPAGA AL NODO GEMELO. La auditoría corre"
+    " contra un solo nodo, pero lo que mide —qué cobra VTEX a esa"
+    " cantidad— es propiedad del SKU, no del nodo. Sin propagar, el mismo"
+    " SKU sale de la misma corrida con dos mayoristas distintos: 10012680"
+    " quedó 88.00 en el 359 (medido, con flag) y 87.90 en el 360"
+    " (reconstruido, sin flag). Medido: ésa era la ÚNICA diferencia de"
+    " mayorista entre nodos en los 1482 SKUs con stock en ambos, o sea que"
+    " el 100% de la varianza mayorista entre sucursales era artefacto de la"
+    " auditoría. Se propaga por RECLAMO COMPLETO (reclamo_mayorista: sku,"
+    " estado, umbral, price_cents, list_price, descuento, mayorista,"
+    " price_origin), no por sku_id: una gemela en quiebre tiene price de"
+    " lista y estado INDETERMINADA, no hizo la misma afirmación, y"
+    " escribirle una cotización sería inventarle una respuesta a un nodo"
+    " que no puede darla ·"
+    " (2c) MUESTRA ESTRATIFICADA por promoción unitaria (price < list_price),"
+    " que es el eje donde la fórmula puede fallar y donde falló. Se tomaban"
+    " 3 filas de ~2000 por cobertura de umbrales y nada más. No fue mala"
+    " suerte: en el nodo 359 de run_20260824_154502 hay 35 filas COMPLETO"
+    " con promoción unitaria sobre 1041 (3.4%), así que tres extracciones"
+    " sin estratificar tienen ~90% de no tocar ninguna — y sin promoción"
+    " unitaria price == list_price y las dos fórmulas dan el mismo número."
+    " Las tres auditorías del 22 y las tres del 24 cayeron, las seis, del"
+    " lado ciego. Ahora va al menos una de cada lado por corrida, con el"
+    " lado con promoción primero por ser el escaso; dentro de cada estrato"
+    " sigue mandando la cobertura de umbrales. No sube el número: la"
+    " muestra cambia con el catálogo de cada día y la serie acumula"
+    " cobertura sola ·"
+    " El manifiesto gana auditoria_mayorista.propagadas y .estratos, y cada"
+    " detalle trae `caso`, `esperado_cents` y `propagado_a`: sin eso el"
+    " manifiesto declara 3 auditorías y el CSV muestra 6 filas tocadas ·"
+    " Cuatro funciones puras nuevas —hay_promo_unitaria,"
+    " esperado_en_auditoria, reclamo_mayorista, aplicar_veredicto_mayorista—"
+    " probadas sin red en tests/makro_plazavea/test_auditoria_mayorista.py.",
     "21  alcanzar el total declarado no es truncamiento (corrección 1)."
     " Extrae evaluar_fin_de_paginado como función pura. SCHEMA_VERSION"
     " sigue en 6: no cambia ninguna columna ·"
@@ -2724,6 +2774,13 @@ AUDITORIA_MAYORISTA: dict[str, Any] = {
     "fallidas": 0,
     "node_id": "",
     "umbrales_auditados": [],
+    # Cuántas filas de OTROS nodos heredaron un veredicto (v22). Sin esto,
+    # el manifiesto declara 3 auditorías y el CSV muestra 6 filas tocadas.
+    "propagadas": 0,
+    # Cuántas de cada lado del eje que la muestra estratifica (v22): con y
+    # sin promoción unitaria. Es la forma de ver, corrida por corrida, si el
+    # lado donde la fórmula puede fallar quedó cubierto.
+    "estratos": {"con_promo_unitaria": 0, "sin_promo_unitaria": 0},
     "detalle": [],
 }
 
@@ -5153,61 +5210,191 @@ def registrar_corrida(resumen: dict[str, Any]) -> None:
 # catálogo restados con confianza.
 
 
-def elegir_auditables_mayorista(
-    filas: list[Fila],
-    node_id: str,
+def hay_promo_unitaria(fila: Fila) -> bool:
+    """
+    `price < list_price`: hay una promoción que ya aplica comprando de a uno.
+
+    Es el eje sobre el que la fórmula del mayorista puede fallar. Hasta v17
+    se restaba sobre `price` en vez de `list_price`, y donde NO hay promoción
+    unitaria las dos fórmulas colapsan en el mismo número: el defecto era
+    invisible en el 87% del dataset y sobrevivió seis semanas. Por eso la
+    muestra de auditoría se estratifica por acá y no por otra cosa.
+    """
+
+    precio = dec(fila.price)
+    lista = dec(fila.list_price)
+
+    return precio is not None and lista is not None and precio < lista
+
+
+def esperado_en_auditoria(fila: Fila) -> dict[str, Any]:
+    """
+    Qué tiene que cobrar VTEX a `qty = bi_umbral`, según lo que la fila afirma.
+
+    Devuelve `{"caso", "esperado_cents"}`. Con la fórmula de v18 hay DOS
+    expectativas distintas, no una, y auditarlas contra la misma referencia
+    reporta discrepancias inexistentes:
+
+        biprecio_status                       esperado a qty=umbral
+        ------------------------------------  ---------------------
+        COMPLETO                              precio_mayorista_cents
+                                              (= list_price − descuento)
+        BIPRECIO_SUPERADO_POR_PROMO           price_cents
+                                              (el escalón no aplica)
+        BIPRECIO_PUBLICACION_INDETERMINADA    NO AUDITABLE
+        cualquier otro                        NO AUDITABLE
+
+    La segunda fila está medida, no supuesta: el SKU 10012680 en
+    `run_20260822_020027` se remidió a qty=umbral y VTEX cobró 88.00, que es
+    exactamente su `price` (con `list_price` 118.50). Bajo la fórmula vieja
+    eso se leyó como DISCREPA y se marcó `DQ_MAYORISTA_DISCREPA`; lo que en
+    realidad pasó es que la promoción unitaria le ganaba al escalón, que es
+    justo lo que `BIPRECIO_SUPERADO_POR_PROMO` afirma. La auditoría VERIFICA
+    esa afirmación en vez de contradecirla.
+
+    Un SUPRIMIDO siempre tiene promoción unitaria, por construcción: el
+    estado exige `list_price − descuento >= price`, y con `price ==
+    list_price` eso pediría un descuento negativo.
+
+    INDETERMINADA se excluye en vez de auditarse contra `price`: ahí no hubo
+    stock, `price` es el precio de lista y VTEX no va a cotizar a ninguna
+    cantidad. Auditarlo sería pedirle una respuesta a un nodo que ya dijo que
+    no puede darla.
+    """
+
+    umbral = entero(fila.bi_umbral)
+
+    if umbral is None or umbral < 2:
+        return {"caso": "NO_AUDITABLE", "esperado_cents": None}
+
+    if fila.biprecio_status == "COMPLETO":
+        return {
+            "caso": "ESCALON_PUBLICADO",
+            "esperado_cents": entero(fila.precio_mayorista_cents),
+        }
+
+    if fila.biprecio_status == "BIPRECIO_SUPERADO_POR_PROMO":
+        return {
+            "caso": "ESCALON_SUPRIMIDO",
+            "esperado_cents": entero(fila.price_cents),
+        }
+
+    return {"caso": "NO_AUDITABLE", "esperado_cents": None}
+
+
+def es_auditable_mayorista(fila: Fila) -> bool:
+    """Atajo legible sobre `esperado_en_auditoria`, para filtrar."""
+
+    resultado = esperado_en_auditoria(fila)
+
+    return (
+        resultado["caso"] != "NO_AUDITABLE"
+        and resultado["esperado_cents"] is not None
+    )
+
+
+def reclamo_mayorista(fila: Fila) -> tuple[str, ...]:
+    """
+    Lo que esta fila AFIRMA sobre el mayorista de su SKU, sin el nodo.
+
+    Dos filas con el mismo reclamo llegaron al mismo número por el mismo
+    camino: mismo SKU, mismo estado, mismo umbral, mismos insumos. Una
+    auditoría contesta por las dos, porque lo que se mide —qué cobra VTEX a
+    esa cantidad— es una propiedad del SKU y no del nodo.
+
+    Se compara el reclamo ENTERO y no solo el `sku_id`, que es la diferencia
+    entre propagar y contagiar. Entre las 1482 filas con stock en los dos
+    nodos de `run_20260822_020027`, `price`, `list_price` y `biprecio_status`
+    coinciden en el 100% de los casos — pero fuera de ese subconjunto no:
+    cuando un nodo está en quiebre su `price` es el de lista
+    (`price_origin = LISTA_SIN_PROMO`) y su estado es INDETERMINADA. Esa fila
+    no hizo la misma afirmación y la auditoría no la contesta. Sin esta
+    condición, medir en un nodo con stock escribiría una cotización en una
+    fila de un nodo que no puede cotizar.
+    """
+
+    return (
+        fila.sku_id,
+        fila.biprecio_status,
+        fila.bi_umbral,
+        fila.price_cents,
+        fila.list_price,
+        fila.descuento_monto_cents,
+        fila.precio_mayorista_cents,
+        fila.price_origin,
+    )
+
+
+def elegir_por_umbral(
+    candidatos: list[Fila],
     cuantos: int,
+    cubiertos: set[int],
 ) -> list[Fila]:
     """
-    Elige qué filas remedir a `qty = bi_umbral`. Determinista y sin `random`.
+    Elige `cuantos` de `candidatos` cubriendo el RANGO DE UMBRALES.
 
-    El criterio NO es el hash que usa `seleccionar()` para la muestra, y la
-    diferencia es deliberada: acá no se busca una muestra REPRESENTATIVA, se
-    busca cubrir el RANGO DE UMBRALES. Tres auditorías del mismo umbral
-    prueban que la fórmula funciona para ese umbral, que es la mitad de lo
-    que esta fase tiene que decir — y deja intacto el hueco de §11.
+    No busca una muestra representativa: tres auditorías del mismo umbral
+    prueban la fórmula para ese umbral y nada más. Orden de prioridad:
 
-    Orden de prioridad:
-
-    1. Un umbral BAJO (2-3), que es el caso ya verificado: si este falla, el
-       problema no está en la escala sino en la fórmula.
+    1. Un umbral BAJO (2-3), el caso ya verificado: si ése falla, el problema
+       no está en la escala sino en la fórmula.
     2. Un umbral ALTO (12-24), el hueco de §11. Se toma el MÁS alto
-       disponible: es donde más lejos está la extrapolación.
+       disponible, que es donde más lejos llega la extrapolación.
     3. El resto, prefiriendo umbrales todavía no cubiertos.
 
-    Determinismo: el desempate es `(bi_umbral, sku_id)`, así que dos corridas
-    con las mismas filas COMPLETO auditan exactamente los mismos SKUs. Eso es
-    lo que hace comparables dos auditorías de días distintos — y lo que hace
-    que este motor reproduzca la elección de la sonda que generó el golden.
+    `cubiertos` entra y sale mutado a propósito: los estratos de
+    `elegir_auditables_mayorista` se eligen uno después de otro y el segundo
+    tiene que saber qué umbrales ya trajo el primero.
+
+    Determinista: el desempate es `(bi_umbral, sku_id)`, así que dos corridas
+    con las mismas filas auditan exactamente los mismos SKUs.
     """
 
-    disponibles = [
-        f for f in filas
-        if f.node_id == node_id
-        and f.biprecio_status == "COMPLETO"
-        and entero(f.bi_umbral)
-    ]
-
-    if not disponibles or cuantos <= 0:
+    if cuantos <= 0 or not candidatos:
         return []
 
-    por_umbral = sorted(disponibles, key=lambda f: (entero(f.bi_umbral), f.sku_id))
+    por_umbral = sorted(candidatos, key=lambda f: (entero(f.bi_umbral), f.sku_id))
 
     elegidos: list[Fila] = []
 
     bajos = [f for f in por_umbral if 2 <= entero(f.bi_umbral) <= 3]
     altos = [f for f in por_umbral if 12 <= entero(f.bi_umbral) <= 24]
 
-    if bajos:
-        elegidos.append(bajos[0])
+    def primero_no_cubierto(candidatos_del_rango: list[Fila]) -> Fila | None:
+        """
+        El primero del rango cuyo umbral no esté ya cubierto, o `None`.
 
-    if altos and altos[-1] not in elegidos:
-        elegidos.append(altos[-1])
+        Las prioridades 1 y 2 también tienen que mirar `cubiertos`, y tienen
+        que RENUNCIAR cuando no aportan. Cuando esta función se llamaba una
+        sola vez con el conjunto vacío daba lo mismo; ahora se llama una vez
+        por estrato y el efecto es visible en datos reales: sobre el nodo 359
+        de las dos corridas, la muestra pasaba a umbrales 2, 3 y 3 y se
+        perdía el umbral ALTO, que es el hueco de §11 y la razón por la que
+        esta fase existe. Devolver `None` deja que el relleno genérico —que
+        arranca por el umbral más alto disponible— cubra el rango.
+        """
 
-    # Si el rango pedido no existe en la muestra, se completa con los
+        for candidato in candidatos_del_rango:
+            if entero(candidato.bi_umbral) not in cubiertos:
+                return candidato
+
+        return None
+
+    bajo = primero_no_cubierto(bajos)
+
+    if bajo is not None:
+        elegidos.append(bajo)
+
+    if len(elegidos) < cuantos:
+        # Los altos se recorren de mayor a menor: es donde más lejos llega la
+        # extrapolación de §11.
+        alto = primero_no_cubierto(list(reversed(altos)))
+
+        if alto is not None and alto not in elegidos:
+            elegidos.append(alto)
+
+    # Si el rango pedido no existe entre los candidatos, se completa con los
     # extremos disponibles, prefiriendo umbrales todavía no cubiertos.
-    cubiertos = {entero(f.bi_umbral) for f in elegidos}
-
     for preferir_nuevo in (True, False):
         for candidato in [por_umbral[-1], por_umbral[0]] + por_umbral:
             if len(elegidos) >= cuantos:
@@ -5216,15 +5403,141 @@ def elegir_auditables_mayorista(
             if candidato in elegidos:
                 continue
 
-            umbral = entero(candidato.bi_umbral)
-
-            if preferir_nuevo and umbral in cubiertos:
+            if preferir_nuevo and entero(candidato.bi_umbral) in cubiertos:
                 continue
 
             elegidos.append(candidato)
-            cubiertos.add(umbral)
+
+    elegidos = elegidos[:cuantos]
+
+    for elegido in elegidos:
+        cubiertos.add(entero(elegido.bi_umbral))
+
+    return elegidos
+
+
+def elegir_auditables_mayorista(
+    filas: list[Fila],
+    node_id: str,
+    cuantos: int,
+) -> list[Fila]:
+    """
+    Elige qué filas remedir a `qty = bi_umbral`. Determinista y sin `random`.
+
+    ESTRATIFICADA por promoción unitaria, que es el eje donde la fórmula
+    puede fallar y donde de hecho falló. Hasta v21 se tomaban 3 filas de
+    ~2000 (0.15%) por cobertura de umbrales y nada más, y eso dejó pasar seis
+    semanas el bug de v18. No es mala suerte, es aritmética: en el nodo 359 de
+    `run_20260824_154502`, 35 de 1041 filas COMPLETO tienen promoción
+    unitaria (3.4%), así que tres extracciones sin estratificar tienen ~90%
+    de probabilidad de no tocar ni una — y sin promoción unitaria
+    `price == list_price` y las dos fórmulas dan el mismo número. La muestra
+    vieja no podía ver el defecto ni corriendo todos los días. Las tres
+    auditorías del 22 y las tres del 24 cayeron, las seis, del lado ciego.
+
+    Con al menos una de cada lado en CADA corrida, el eje queda cubierto sin
+    subir el número: la muestra cambia con el catálogo de cada día, así que
+    la serie acumula cobertura sola.
+
+    El otro cambio: los `BIPRECIO_SUPERADO_POR_PROMO` ahora también son
+    auditables (`esperado_en_auditoria`). Ese estado AFIRMA algo —que el
+    escalón no se cobra— y hasta acá era la única afirmación del bi-precio
+    que nada verificaba. Además son 124 filas con promoción unitaria por
+    construcción: son el estrato escaso.
+
+    Dentro de cada estrato manda la cobertura de umbrales, que era el
+    criterio anterior y sigue valiendo (`elegir_por_umbral`).
+    """
+
+    disponibles = [
+        f for f in filas
+        if f.node_id == node_id and es_auditable_mayorista(f)
+    ]
+
+    if not disponibles or cuantos <= 0:
+        return []
+
+    con_promo = [f for f in disponibles if hay_promo_unitaria(f)]
+    sin_promo = [f for f in disponibles if not hay_promo_unitaria(f)]
+
+    elegidos: list[Fila] = []
+    cubiertos: set[int] = set()
+
+    # Primero uno de cada estrato no vacío. `con_promo` va primero porque es
+    # el escaso y el que importa: si `cuantos` fuera 1, la única auditoría
+    # tiene que caer del lado que puede fallar.
+    for estrato in (con_promo, sin_promo):
+        if estrato and len(elegidos) < cuantos:
+            elegidos.extend(elegir_por_umbral(estrato, 1, cubiertos))
+
+    # El resto por cobertura de umbrales sobre todo lo disponible: los
+    # estratos ya están representados y a partir de acá lo que falta es rango.
+    resto = [f for f in disponibles if f not in elegidos]
+
+    elegidos.extend(elegir_por_umbral(resto, cuantos - len(elegidos), cubiertos))
 
     return elegidos[:cuantos]
+
+
+def aplicar_veredicto_mayorista(
+    fila: Fila,
+    medido_cents: int,
+    esperado_cents: int,
+    caso: str,
+) -> str:
+    """
+    Escribe en la fila lo que la auditoría midió. Devuelve COINCIDE/DISCREPA.
+
+    Sin red: es la parte de `auditar_mayorista` que decide qué queda escrito,
+    separada para poder probarla y —sobre todo— para poder aplicarla IDÉNTICA
+    a las filas gemelas del mismo SKU en otros nodos.
+
+    El medido siempre gana, coincida o no: es lo que el cliente paga.
+    `descuento_monto` NO se toca, porque el desacuerdo entre lo que VTEX
+    declara y lo que cobra ES el hallazgo y borrar cualquiera de los dos
+    lados lo borraría.
+
+    La única excepción es un ESCALON_SUPRIMIDO que coincide: ahí lo medido es
+    el precio unitario, y escribirlo en `precio_mayorista` publicaría un
+    mayorista idéntico al unitario — la mentira que §6.2 evita dejando la
+    celda vacía. Lo verificado en ese caso no es un precio sino su AUSENCIA,
+    y eso ya lo dice `biprecio_status`. Un SUPRIMIDO que DISCREPA sí escribe:
+    ahí apareció un precio que la fila negaba.
+    """
+
+    coincide = medido_cents == esperado_cents
+
+    if coincide and caso == "ESCALON_SUPRIMIDO":
+        return "COINCIDE"
+
+    fila.precio_mayorista_verificado = "SI"
+    fila.precio_mayorista_cents = str(medido_cents)
+    fila.precio_mayorista = money(Decimal(medido_cents) / 100)
+
+    unitario = entero(fila.price_cents)
+
+    if unitario:
+        # El porcentaje se recalcula contra el precio REALMENTE cobrado, para
+        # que precio y porcentaje no se contradigan dentro de la misma fila.
+        fila.descuento_mayorista_pct = (
+            f"{(Decimal(unitario - medido_cents) / Decimal(unitario) * 100).quantize(CENTAVO)}"
+        )
+
+    cantidad = dec(fila.cantidad_base)
+
+    if cantidad and cantidad > CERO:
+        fila.precio_mayorista_por_unidad_base = money4(
+            Decimal(medido_cents) / 100 / cantidad
+        )
+
+    if coincide:
+        return "COINCIDE"
+
+    fila.dq_flags = "|".join(
+        [f for f in (fila.dq_flags, "DQ_MAYORISTA_DISCREPA") if f]
+    )
+
+    return "DISCREPA"
 
 
 async def auditar_mayorista(
@@ -5232,37 +5545,67 @@ async def auditar_mayorista(
     fila: Fila,
     producto: Producto,
     nodo: Nodo,
+    filas: list[Fila] | None = None,
 ) -> dict[str, Any]:
     """
-    Remide el MISMO SKU a `qty = bi_umbral` y contrasta contra lo reconstruido.
+    Remide el MISMO SKU a `qty = bi_umbral` y contrasta contra lo esperado.
 
-    Si coinciden, la fila pasa a `precio_mayorista_verificado = SI` y el
-    número deja de ser una resta para pasar a ser una observación.
+    Qué se espera depende de lo que la fila afirme, no de una sola fórmula
+    (`esperado_en_auditoria`): un COMPLETO tiene que cobrar
+    `list_price − descuento`, y un BIPRECIO_SUPERADO_POR_PROMO tiene que
+    cobrar `price`, porque su escalón no aplica. Contrastar los dos contra el
+    mayorista reconstruido reporta discrepancias inexistentes — es lo que le
+    pasó al SKU 10012680 en `run_20260822_020027`.
 
-    Si NO coinciden, gana el MEDIDO —es lo que el cliente pagaría— y la fila
-    sale marcada `DQ_MAYORISTA_DISCREPA`. `descuento_monto` NO se toca: sigue
-    siendo lo que VTEX declaró, y justamente que lo declarado y lo cobrado no
-    cierren es el hallazgo. Una discrepancia acá invalida la fórmula de §1
+    Si coincide, la fila pasa a `precio_mayorista_verificado = SI` y el número
+    deja de ser una resta para pasar a ser una observación.
+
+    Si NO coincide, gana el MEDIDO y la fila sale marcada
+    `DQ_MAYORISTA_DISCREPA`. Una discrepancia acá invalida la fórmula de §1
     para ese umbral, que es de las cosas más caras que pueden pasarle a este
     dataset: se registra en la fila, en el manifiesto y a gritos en consola.
+
+    EL VEREDICTO SE PROPAGA a las filas gemelas (`reclamo_mayorista`): lo que
+    se mide es qué cobra VTEX a esa cantidad, y eso es propiedad del SKU, no
+    del nodo. La auditoría corre contra un solo nodo, así que sin propagar,
+    el mismo SKU sale de la misma corrida con dos mayoristas distintos —
+    10012680 salió 88.00 en el 359 (medido, con flag) y 87.90 en el 360
+    (reconstruido, sin flag), y ésa era la ÚNICA diferencia de mayorista
+    entre nodos en los 1482 SKUs con stock en ambos. El 100% de la varianza
+    mayorista entre sucursales era artefacto de la auditoría.
 
     Nunca lanza salvo `TopeAgotadoError`, que es condición de corrida.
     """
 
     umbral = entero(fila.bi_umbral)
-    reconstruido = entero(fila.precio_mayorista_cents)
+    expectativa = esperado_en_auditoria(fila)
+    esperado = expectativa["esperado_cents"]
 
     resultado: dict[str, Any] = {
         "sku_id": fila.sku_id,
         "node_id": nodo.node_id,
         "producto": fila.product_name,
         "umbral": umbral,
+        "caso": expectativa["caso"],
         "unitario_cents": entero(fila.price_cents),
-        "reconstruido_cents": reconstruido,
+        "reconstruido_cents": entero(fila.precio_mayorista_cents),
+        "esperado_cents": esperado,
         "medido_cents": None,
         "veredicto": "",
         "detalle": "",
+        "propagado_a": [],
     }
+
+    if esperado is None:
+        # `elegir_auditables_mayorista` ya filtra por esto; acá es la guarda
+        # de un llamador que pase una fila a mano.
+        resultado["veredicto"] = "AUDITORIA_FALLIDA"
+        resultado["detalle"] = f"fila no auditable ({fila.biprecio_status})"
+        return resultado
+
+    # El reclamo se toma ANTES de escribir nada: es contra el estado previo
+    # que se decide qué otras filas hicieron la misma afirmación.
+    reclamo = reclamo_mayorista(fila)
 
     try:
         status, datos = await consultar_simulation(cliente, producto, nodo, umbral)
@@ -5292,40 +5635,24 @@ async def auditar_mayorista(
         resultado["detalle"] = "simulation no devolvió sellingPrice"
         return resultado
 
-    # El precio medido es el HECHO. Se escribe siempre, coincida o no.
-    fila.precio_mayorista_verificado = "SI"
-    fila.precio_mayorista_cents = str(medido)
-    fila.precio_mayorista = money(Decimal(medido) / 100)
-
-    unitario = entero(fila.price_cents)
-
-    if unitario:
-        # El porcentaje se recalcula contra el precio REALMENTE cobrado, para
-        # que precio y porcentaje no se contradigan dentro de la misma fila.
-        fila.descuento_mayorista_pct = (
-            f"{(Decimal(unitario - medido) / Decimal(unitario) * 100).quantize(CENTAVO)}"
-        )
-
-    cantidad = dec(fila.cantidad_base)
-
-    if cantidad and cantidad > CERO:
-        fila.precio_mayorista_por_unidad_base = money4(
-            Decimal(medido) / 100 / cantidad
-        )
-
-    if medido == reconstruido:
-        resultado["veredicto"] = "COINCIDE"
-        return resultado
-
-    resultado["veredicto"] = "DISCREPA"
-    resultado["detalle"] = (
-        f"medido {medido} vs reconstruido {reconstruido} "
-        f"({medido - (reconstruido or 0):+d} céntimos)"
+    veredicto = aplicar_veredicto_mayorista(
+        fila, medido, esperado, expectativa["caso"]
     )
 
-    fila.dq_flags = "|".join(
-        [f for f in (fila.dq_flags, "DQ_MAYORISTA_DISCREPA") if f]
-    )
+    resultado["veredicto"] = veredicto
+
+    if veredicto == "DISCREPA":
+        resultado["detalle"] = (
+            f"medido {medido} vs esperado {esperado} "
+            f"({medido - esperado:+d} céntimos, {expectativa['caso']})"
+        )
+
+    for gemela in filas or []:
+        if gemela is fila or reclamo_mayorista(gemela) != reclamo:
+            continue
+
+        aplicar_veredicto_mayorista(gemela, medido, esperado, expectativa["caso"])
+        resultado["propagado_a"].append(gemela.node_id)
 
     return resultado
 
@@ -6316,13 +6643,22 @@ async def main() -> int:
 
                 AUDITORIA_MAYORISTA["node_id"] = nodo_auditoria.node_id
                 AUDITORIA_MAYORISTA["solicitadas"] = len(auditables)
+                AUDITORIA_MAYORISTA["estratos"] = {
+                    "con_promo_unitaria": sum(
+                        1 for f in auditables if hay_promo_unitaria(f)
+                    ),
+                    "sin_promo_unitaria": sum(
+                        1 for f in auditables if not hay_promo_unitaria(f)
+                    ),
+                }
 
                 if not auditables:
                     log("")
                     log(
-                        "Auditoría del mayorista: ninguna fila salió "
-                        f"biprecio_status=COMPLETO en el nodo "
-                        f"{nodo_auditoria.node_id} — no hay nada que auditar."
+                        "Auditoría del mayorista: ninguna fila del nodo "
+                        f"{nodo_auditoria.node_id} quedó auditable "
+                        "(COMPLETO o BIPRECIO_SUPERADO_POR_PROMO, con "
+                        "umbral) — no hay nada que auditar."
                     )
                 else:
                     log("")
@@ -6349,7 +6685,11 @@ async def main() -> int:
 
                     try:
                         resultado = await auditar_mayorista(
-                            cliente, fila_auditada, producto, nodo_auditoria
+                            cliente,
+                            fila_auditada,
+                            producto,
+                            nodo_auditoria,
+                            filas,
                         )
                     except TopeAgotadoError as exc:
                         # Mismo trato que las otras fases: es condición de
@@ -6369,6 +6709,9 @@ async def main() -> int:
                         break
 
                     AUDITORIA_MAYORISTA["detalle"].append(resultado)
+                    AUDITORIA_MAYORISTA["propagadas"] += len(
+                        resultado["propagado_a"]
+                    )
 
                     if resultado["veredicto"] == "AUDITORIA_FALLIDA":
                         AUDITORIA_MAYORISTA["fallidas"] += 1
@@ -6385,10 +6728,16 @@ async def main() -> int:
 
                     log(
                         f"  {resultado['sku_id']:>9} qty={resultado['umbral']:<3} "
-                        f"{(resultado['producto'] or '')[:34]:<36} "
-                        f"reconstruido={resultado['reconstruido_cents']} "
+                        f"{(resultado['producto'] or '')[:30]:<32} "
+                        f"{resultado['caso']:<18} "
+                        f"esperado={resultado['esperado_cents']} "
                         f"medido={resultado['medido_cents']} "
                         f"{resultado['veredicto']} {resultado['detalle']}"
+                        + (
+                            f" (propagado a {', '.join(resultado['propagado_a'])})"
+                            if resultado["propagado_a"]
+                            else ""
+                        )
                     )
 
                 AUDITORIA_MAYORISTA["umbrales_auditados"] = sorted(
@@ -6526,6 +6875,27 @@ async def main() -> int:
             f"qty=bi_umbral contra el nodo {AUDITORIA_MAYORISTA['node_id']}"
         )
 
+        estratos = AUDITORIA_MAYORISTA["estratos"]
+
+        log(
+            f"                   estratos: "
+            f"{estratos['con_promo_unitaria']} con promoción unitaria, "
+            f"{estratos['sin_promo_unitaria']} sin"
+            + (
+                "  (SIN COBERTURA del lado con promoción: es el eje donde la"
+                " fórmula puede fallar)"
+                if not estratos["con_promo_unitaria"]
+                else ""
+            )
+        )
+
+        if AUDITORIA_MAYORISTA["propagadas"]:
+            log(
+                f"                   veredicto propagado a "
+                f"{AUDITORIA_MAYORISTA['propagadas']} filas gemelas de otros "
+                "nodos (mismo SKU, misma afirmación)"
+            )
+
         if umbrales:
             log(
                 f"                   umbrales auditados: "
@@ -6540,7 +6910,7 @@ async def main() -> int:
         if AUDITORIA_MAYORISTA["discrepan"] == 0 and AUDITORIA_MAYORISTA["realizadas"]:
             log(
                 f"                   COINCIDEN — el precio medido a qty=umbral "
-                f"es exacto al reconstruido en "
+                f"es exacto al esperado en "
                 f"{AUDITORIA_MAYORISTA['coinciden']}/"
                 f"{AUDITORIA_MAYORISTA['realizadas']}"
             )
@@ -6552,8 +6922,8 @@ async def main() -> int:
                 f"{AUDITORIA_MAYORISTA['discrepan']} DE "
                 f"{AUDITORIA_MAYORISTA['realizadas']} AUDITORÍAS."
             )
-            log("precio_mayorista = price - descuento NO reprodujo lo que VTEX")
-            log("cobra a qty=umbral. Las filas afectadas llevan el precio MEDIDO")
+            log("precio_mayorista = list_price - descuento NO reprodujo lo que")
+            log("VTEX cobra a qty=umbral. Las filas afectadas llevan el MEDIDO")
             log("y la marca DQ_MAYORISTA_DISCREPA, pero el resto del dataset")
             log("sigue reconstruido con una fórmula que acaba de fallar: revisa")
             log("manifiesto.auditoria_mayorista antes de usar esa columna.")
