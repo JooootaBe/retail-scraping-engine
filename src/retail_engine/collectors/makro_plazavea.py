@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.25-22"
+VERSION = "2026.08.25-23"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -198,6 +198,33 @@ VERSION = "2026.08.25-22"
 SCHEMA_VERSION = "6"
 
 CAMBIOS = [
+    "23  el estado por-corrida se reinicia desde una sola definición."
+    " SCHEMA_VERSION sigue en 6: no cambia ninguna columna ·"
+    " EL HECHO: la primera corrida en vivo de v22 murió con KeyError:"
+    " 'propagadas' en el bucle de auditoría, con los 53 tests en verde ·"
+    " LA CAUSA: MEDICION, STOCK_CADENA_ESTADO y AUDITORIA_MAYORISTA se"
+    " escribían DOS veces —el literal de módulo y una copia dentro de"
+    " main() para reiniciarlos entre corridas—. v22 agregó `propagadas` y"
+    " `estratos` al literal y no a la copia. Las dos claves faltaban:"
+    " `propagadas` mata la corrida porque el motor la incrementa con +=,"
+    " `estratos` no rompe nada y simplemente se pierde del manifiesto, que"
+    " es el modo de falla peor de los dos ·"
+    " POR QUÉ NINGÚN TEST LO VIO: el reinicio vivía adentro de una main()"
+    " async de 600 líneas que abre Playwright y sale a la red antes de"
+    " llegar a la auditoría. Los tests de la fase construyen sus propios"
+    " diccionarios, así que la fase estaba cubierta y su INICIALIZACIÓN no"
+    " — la única parte que ningún stub podía sustituir ·"
+    " EL ARREGLO: la forma de cada diccionario vive en una función"
+    " (estado_medicion_inicial, estado_stock_cadena_inicial,"
+    " estado_auditoria_mayorista_inicial) que se usa tanto al importar el"
+    " módulo como al reiniciar, y el reinicio sale de main() a"
+    " reiniciar_estado_por_corrida(), que un test puede llamar sin red."
+    " Agregar una clave en un solo lugar ahora es agregarla en los dos ·"
+    " tests/makro_plazavea/test_estado_por_corrida.py verifica que las"
+    " claves sobrevivan al reinicio, que los contadores admitan += recién"
+    " reiniciados, que las estructuras anidadas se rehagan en vez de"
+    " compartirse entre corridas, y que main() no vuelva a reiniciar con"
+    " un literal en línea. Con el bug de v22 repuesto falla 5 de 6.",
     "22  la auditoría del mayorista esperaba el número equivocado, no"
     " propagaba su veredicto y muestreaba del lado ciego (corrección 2)."
     " SCHEMA_VERSION sigue en 6: no cambia ninguna columna ·"
@@ -2766,23 +2793,30 @@ AUDITORIA: dict[str, Any] = {
 # Sin esta fase, `precio_mayorista_cents` es una resta de dos números del
 # catálogo hecha con confianza, y `precio_mayorista_verificado` no puede
 # decir otra cosa que `NO` en todas las filas.
-AUDITORIA_MAYORISTA: dict[str, Any] = {
-    "solicitadas": 0,
-    "realizadas": 0,
-    "coinciden": 0,
-    "discrepan": 0,
-    "fallidas": 0,
-    "node_id": "",
-    "umbrales_auditados": [],
-    # Cuántas filas de OTROS nodos heredaron un veredicto (v22). Sin esto,
-    # el manifiesto declara 3 auditorías y el CSV muestra 6 filas tocadas.
-    "propagadas": 0,
-    # Cuántas de cada lado del eje que la muestra estratifica (v22): con y
-    # sin promoción unitaria. Es la forma de ver, corrida por corrida, si el
-    # lado donde la fórmula puede fallar quedó cubierto.
-    "estratos": {"con_promo_unitaria": 0, "sin_promo_unitaria": 0},
-    "detalle": [],
-}
+def estado_auditoria_mayorista_inicial() -> dict[str, Any]:
+    """La forma de `AUDITORIA_MAYORISTA`, en UN solo lugar (v23)."""
+
+    return {
+        "solicitadas": 0,
+        "realizadas": 0,
+        "coinciden": 0,
+        "discrepan": 0,
+        "fallidas": 0,
+        "node_id": "",
+        "umbrales_auditados": [],
+        # Cuántas filas de OTROS nodos heredaron un veredicto (v22). Sin
+        # esto, el manifiesto declara 3 auditorías y el CSV muestra 6 filas
+        # tocadas.
+        "propagadas": 0,
+        # Cuántas de cada lado del eje que la muestra estratifica (v22): con
+        # y sin promoción unitaria. Es la forma de ver, corrida por corrida,
+        # si el lado donde la fórmula puede fallar quedó cubierto.
+        "estratos": {"con_promo_unitaria": 0, "sin_promo_unitaria": 0},
+        "detalle": [],
+    }
+
+
+AUDITORIA_MAYORISTA: dict[str, Any] = estado_auditoria_mayorista_inicial()
 
 # Avisos que hasta v11 solo existían en la consola de una corrida que
 # nadie estaba mirando (bug confirmado en v11, revisión de Codex, 13-ago:
@@ -2816,23 +2850,32 @@ SELECCION: dict[str, Any] = {}
 # la atrapa UNA vez: deja de pedir, conserva lo ya medido, y registra qué
 # pares (sku_id, node_id) quedaron sin intentar — en vez de inventarles una
 # fila de "excepción" que nunca ocurrió.
-MEDICION: dict[str, Any] = {
-    "esperadas": 0,
-    "realizadas": 0,
-    "completa": True,
-    "motivo": "",
-    "pendientes_total": 0,
-    "pendientes_muestra": [],
-}
+def estado_medicion_inicial() -> dict[str, Any]:
+    """La forma de `MEDICION`, en UN solo lugar (v23)."""
+
+    return {
+        "esperadas": 0,
+        "realizadas": 0,
+        "completa": True,
+        "motivo": "",
+        "pendientes_total": 0,
+        "pendientes_muestra": [],
+    }
+
+
+MEDICION: dict[str, Any] = estado_medicion_inicial()
 
 # Estado de la fase de STOCK DE CADENA (v13). Mismo criterio que MEDICION:
 # si el presupuesto se agota a mitad del refresco de stock, es un fallo de
 # fase, no algo que se deba disfrazar de "aviso" genérico y seguir como si
 # nada (ver refrescar_stock_cadena y la llamada en main()).
-STOCK_CADENA_ESTADO: dict[str, Any] = {
-    "completo": True,
-    "motivo": "",
-}
+def estado_stock_cadena_inicial() -> dict[str, Any]:
+    """La forma de `STOCK_CADENA_ESTADO`, en UN solo lugar (v23)."""
+
+    return {"completo": True, "motivo": ""}
+
+
+STOCK_CADENA_ESTADO: dict[str, Any] = estado_stock_cadena_inicial()
 
 # Umbral de alarma de firma por nodo (v13, Prioridad 5).
 #
@@ -2855,6 +2898,42 @@ STOCK_CADENA_ESTADO: dict[str, Any] = {
 UMBRAL_ALARMA_FIRMA = 5
 MATCHES_VALIDOS = {"MATCH", "MATCH_SELLER_RAIZ", "MATCH_SIN_CONFIRMAR"}
 ALARMA_FIRMA_DISPARADA: dict[str, bool] = {}
+
+
+def reiniciar_estado_por_corrida() -> None:
+    """
+    Deja el estado por-corrida como recién importado.
+
+    Estos diccionarios son globales de módulo para que
+    `escribir_manifiesto()` los lea sin pasarlos por parámetro, igual que
+    AUDITORIA/SELECCION/AVISOS ya hacían en v11/v12. Si `main()` corre más de
+    una vez en el mismo proceso (tests, uso programático), tienen que
+    arrancar limpios en cada corrida.
+
+    POR QUÉ ES UNA FUNCIÓN Y NO CUATRO BLOQUES ADENTRO DE `main()` (v23).
+    Lo era, y cada diccionario terminaba escrito DOS veces: el literal de
+    módulo y su copia en el reinicio. v22 agregó `propagadas` y `estratos` a
+    AUDITORIA_MAYORISTA, la copia de `main()` quedó sin ellas, y la corrida
+    en vivo murió con `KeyError: 'propagadas'` en el bucle de auditoría —
+    con los 53 tests en verde, porque el reinicio vivía adentro de una
+    `main()` de 600 líneas que necesita Playwright y red para llegar a
+    ejecutarse. Ningún test podía tocarlo.
+
+    Ahora la forma vive en una sola función por diccionario
+    (`estado_*_inicial`), que es la que se usa tanto al importar el módulo
+    como acá. Agregar una clave en un solo lugar es agregarla en los dos, y
+    `test_estado_por_corrida.py` verifica que sigan siendo el mismo.
+    """
+
+    for objetivo, inicial in (
+        (MEDICION, estado_medicion_inicial()),
+        (STOCK_CADENA_ESTADO, estado_stock_cadena_inicial()),
+        (AUDITORIA_MAYORISTA, estado_auditoria_mayorista_inicial()),
+    ):
+        objetivo.clear()
+        objetivo.update(inicial)
+
+    ALARMA_FIRMA_DISPARADA.clear()
 
 
 def guardar_evidencia(
@@ -6027,38 +6106,7 @@ async def main() -> int:
     # "no escribe nada" no admite excepciones (§8.1).
     GUARDAR_EVIDENCIA = not argumentos.sin_evidencia and not DRY_RUN
 
-    # Estado por-corrida (v13). Estos diccionarios son globales de módulo
-    # para que escribir_manifiesto() los lea sin pasarlos por parámetro,
-    # igual que AUDITORIA/SELECCION/AVISOS ya hacían en v11/v12. Si
-    # `main()` se llama más de una vez en el mismo proceso (tests, uso
-    # programático), tienen que arrancar limpios en cada corrida.
-    MEDICION.clear()
-    MEDICION.update(
-        {
-            "esperadas": 0,
-            "realizadas": 0,
-            "completa": True,
-            "motivo": "",
-            "pendientes_total": 0,
-            "pendientes_muestra": [],
-        }
-    )
-    STOCK_CADENA_ESTADO.clear()
-    STOCK_CADENA_ESTADO.update({"completo": True, "motivo": ""})
-    ALARMA_FIRMA_DISPARADA.clear()
-    AUDITORIA_MAYORISTA.clear()
-    AUDITORIA_MAYORISTA.update(
-        {
-            "solicitadas": 0,
-            "realizadas": 0,
-            "coinciden": 0,
-            "discrepan": 0,
-            "fallidas": 0,
-            "node_id": "",
-            "umbrales_auditados": [],
-            "detalle": [],
-        }
-    )
+    reiniciar_estado_por_corrida()
 
     if argumentos.salida:
         SALIDA = Path(argumentos.salida).expanduser().resolve()

@@ -23,11 +23,11 @@ A single-purpose extractor: it pulls per-branch (sucursal) retail prices from Ma
 storefront (`www.makro.plazavea.com.pe`) using Playwright's async `APIRequestContext` to call VTEX's
 public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). The extraction logic is
 still **one file**: a single module inside an installable package. There is no test *runner* wired up, but
-five regression files now exist, run standalone or under pytest, and cover the pure rules — not the
+six regression files now exist, run standalone or under pytest, and cover the pure rules — not the
 network path.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-22, SCHEMA_VERSION 6)
+src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-23, SCHEMA_VERSION 6)
 pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
 docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
 CHANGELOG.md                                     released and unreleased changes
@@ -38,6 +38,7 @@ tests/makro_plazavea/test_precio_en_quiebre.py   the six branches of price_origi
 tests/makro_plazavea/test_propiedades_corrida.py invariants over a real run, replayed from raw.jsonl.gz
 tests/makro_plazavea/test_truncamiento.py        the four cases of the pagination ceiling
 tests/makro_plazavea/test_auditoria_mayorista.py the wholesale audit: expectation, propagation, strata
+tests/makro_plazavea/test_estado_por_corrida.py  run-scoped globals survive their own reset
 tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
 ops/                                             operational tools — NOT the engine; they never measure prices
 ops/arbol_categorias.py                          snapshots the category tree and diffs it against the last one
@@ -94,15 +95,17 @@ sense when the series was one mutable file being appended to. With one immutable
 no accumulated file to reset, and the only thing the flag could still delete is closed history. A flag
 whose only possible effect is destroying the past does not get redefined — it gets removed.
 
-**There is no lint/test/build tooling wired up in this repo**, but the regression suite is real: 53
+**There is no lint/test/build tooling wired up in this repo**, but the regression suite is real: 59
 cases under `tests/makro_plazavea/`, run together with `python -m pytest tests/ -q` (pytest is not a
 declared dependency — install it, or run each file on its own). `probes/` is for exploratory probes and
 `tests/makro_plazavea/` for permanent regression; the two are not interchangeable, and each file
-resolves the repo root as `parents[2]` from its own path. The five files:
+resolves the repo root as `parents[2]` from its own path. The six files:
 `test_precio_mayorista.py` (23 storefront cards), `test_precio_en_quiebre.py` (the six `price_origin`
 branches, hand-built rows), `test_propiedades_corrida.py` (invariants over a real run, replayed from
 `raw.jsonl.gz`; skips itself when `data/` is empty), `test_truncamiento.py` (the pagination ceiling) and
-`test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata). Each also
+`test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata) and
+`test_estado_por_corrida.py` (the run-scoped globals, whose reset lived unreachable inside `main()`
+until v23). Each also
 prints a report and exits 0/1 when run standalone.
 They test the **pure** functions and the wiring around them — nothing there touches the network, so they
 are not a substitute for a small live run. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10

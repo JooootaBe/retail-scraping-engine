@@ -7,7 +7,7 @@ y el versionado sigue [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
-Cuatro versiones del motor desde 1.2.0 — v18 a v21 — y dos de ellas mueven `SCHEMA_VERSION`
+Seis versiones del motor desde 1.2.0 — v18 a v23 — y dos de ellas mueven `SCHEMA_VERSION`
 (4 → 5 → 6). Nada de esto está publicado todavía.
 
 ### Added
@@ -36,12 +36,15 @@ Cuatro versiones del motor desde 1.2.0 — v18 a v21 — y dos de ellas mueven `
   `run_20260822_020027` la cadena `CantidadBiPrecioMK` aparecía cero veces en el archivo, así que
   el CSV no podía reproducir su propio veredicto. Un campo `tipo` (`catalogo` / `medicion`) separa
   las dos puertas. **No es recuperable hacia atrás**
-- **Suite de regresión permanente** en `tests/makro_plazavea/`, 28 casos, ninguno toca la red:
+- **Suite de regresión permanente** en `tests/makro_plazavea/`, 59 casos, ninguno toca la red:
   `test_precio_mayorista.py` (23 fichas del storefront capturadas a mano — la única verdad
   EXTERNA del repo, la que no sale de la misma API que el motor está midiendo),
   `test_precio_en_quiebre.py` (las seis ramas de `price_origin`, filas armadas a mano),
   `test_propiedades_corrida.py` (invariantes sobre una corrida real, releída desde
-  `raw.jsonl.gz`) y `test_truncamiento.py` (los cuatro casos del techo de paginado)
+  `raw.jsonl.gz`), `test_truncamiento.py` (los cuatro casos del techo de paginado),
+  `test_auditoria_mayorista.py` (expectativa, propagación y estratos de la auditoría) y
+  `test_estado_por_corrida.py` (los globales por-corrida, cuyo reinicio vivía inalcanzable dentro de
+  `main()` hasta v23)
 
 ### Changed
 - **`precio_mayorista = list_price − descuento`**, no `price − descuento` (v18).
@@ -70,6 +73,33 @@ Cuatro versiones del motor desde 1.2.0 — v18 a v21 — y dos de ellas mueven `
   errores de colección
 
 ### Fixed
+- **El estado por-corrida se reinicia desde una sola definición** (v23). La primera corrida en vivo de
+  v22 murió con `KeyError: 'propagadas'` en el bucle de auditoría, con los 53 tests en verde.
+  `MEDICION`, `STOCK_CADENA_ESTADO` y `AUDITORIA_MAYORISTA` se escribían dos veces —el literal de
+  módulo y una copia dentro de `main()` para reiniciarlos entre corridas— y v22 agregó `propagadas` y
+  `estratos` solo al literal. `propagadas` mata la corrida porque el motor la incrementa con `+=`;
+  `estratos` no rompe nada y se pierde del manifiesto, que es el modo de falla peor de los dos. Ningún
+  test lo vio porque el reinicio vivía dentro de una `main()` async de 600 líneas que abre Playwright y
+  sale a la red antes de llegar a la auditoría: la fase estaba cubierta y su inicialización no. Ahora
+  la forma de cada diccionario vive en una función que se usa al importar y al reiniciar, y el reinicio
+  salió de `main()` a `reiniciar_estado_por_corrida()`, que un test puede llamar sin red
+- **La auditoría del mayorista esperaba el número equivocado, no propagaba su veredicto y muestreaba
+  del lado ciego** (v22). Tres defectos de la misma fase. (a) Con la fórmula de v18 hay **dos**
+  expectativas de qué cobra VTEX a `qty = bi_umbral`, no una: un `COMPLETO` debe cobrar
+  `list_price − descuento` y un `BIPRECIO_SUPERADO_POR_PROMO` debe cobrar `price`, porque su escalón no
+  aplica. El SKU 10012680 de `run_20260822_020027` se remidió, VTEX cobró 88.00 —exactamente su `price`,
+  con `list_price` 118.50— y salió marcado `DQ_MAYORISTA_DISCREPA` cuando lo que ocurrió es que la
+  promoción unitaria le ganaba al escalón. Los `SUPERADO` pasan a ser auditables: ese estado afirma algo
+  y era la única afirmación del bi-precio que nada verificaba; `INDETERMINADA` queda excluida, porque sin
+  stock VTEX no cotiza a ninguna cantidad. (b) El veredicto se **propaga** a las filas gemelas: lo que se
+  mide es propiedad del SKU, no del nodo, y la auditoría corre contra uno solo. Ese SKU salió de la misma
+  corrida con 88.00 en el 359 y 87.90 en el 360, y ésa era la única diferencia de mayorista entre nodos en
+  los 1482 SKUs con stock en ambos — el 100% de la varianza mayorista entre sucursales era artefacto. Se
+  propaga por reclamo completo y no por `sku_id`: una gemela en quiebre no hizo la misma afirmación.
+  (c) La muestra se **estratifica** por promoción unitaria, que es el eje donde la fórmula falló: 35 filas
+  `COMPLETO` con promoción sobre 1041 en el nodo 359 (3.4%), así que tres extracciones sin estratificar
+  tienen ~90% de no tocar ninguna. Las tres auditorías del 22 y las tres del 24 cayeron, las seis, del
+  lado ciego. El manifiesto gana `auditoria_mayorista.propagadas` y `.estratos`
 - **Alcanzar el total declarado no es truncamiento** (v21). `run_20260822_020027` y
   `run_20260824_154502` quedaron las dos clasificadas `INCOMPLETO_NO_PLANEADO` por
   `TRUNCAMIENTO_VTEX` con un único fallo, la categoría "Fideos Largos", y el mensaje se contradecía
