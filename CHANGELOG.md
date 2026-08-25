@@ -7,6 +7,79 @@ y el versionado sigue [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
+Cuatro versiones del motor desde 1.2.0 — v18 a v21 — y dos de ellas mueven `SCHEMA_VERSION`
+(4 → 5 → 6). Nada de esto está publicado todavía.
+
+### Added
+- **`price_origin`** (v20): `MEDIDO` (hubo stock, la simulación evaluó promociones) /
+  `LISTA_SIN_PROMO` (no hubo stock, `price` es el precio de lista) / vacío (no se midió).
+  `SCHEMA_VERSION` 5 → 6, 78 → 79 columnas. VTEX no evalúa promociones cuando el nodo no tiene
+  stock y devuelve el precio de lista, y hasta v19 ese número entraba en `price` sin forma de
+  distinguirlo de uno cotizado. Medido: las 143 filas `withoutStock` de `run_20260822_020027`
+  tienen `price == list_price` y `discount_pct = 0.00`, las 143 sin una excepción, contra 19.8% de
+  incidencia de promoción entre las filas con stock. La regla mira `availability`, **nunca** la
+  relación `price`/`list_price`: esa igualdad también le pasa a una fila con stock y sin promoción,
+  y una consecuencia no puede ser el criterio
+- **Estado `BIPRECIO_PUBLICACION_INDETERMINADA`** (v20): sin stock el precio mayorista se calcula
+  igual —`list_price` es catálogo y el descuento viene del teaser, ninguno depende del stock— pero
+  la regla de publicación no se puede evaluar. Se entrega el precio y no se afirma su vigencia
+- **Estado `BIPRECIO_SUPERADO_POR_PROMO`** (v18): si `list_price − descuento >= price`, el escalón
+  no se publica ni se cobra
+- **Quinta regla de calidad `DQ_SIN_STOCK_CON_DESCUENTO`** (v20): fila sin stock con
+  `sellingPrice < listPrice`, que contradice la premisa de `LISTA_SIN_PROMO`. No ocurre hoy (0 de
+  143) y no se corrige: se avisa
+- **La fase de descubrimiento archiva su crudo** en `raw.jsonl.gz` (v19): el árbol de categorías
+  (`category_tree`), cada página de categoría (`category_page`, con ruta/nivel/ventana/`resources`)
+  y cada lote de `--skus` (`skus_lookup`). `guardar_evidencia` solo se llamaba sobre respuestas de
+  medición, y el descubrimiento es la **única** fuente de `CantidadBiPrecioMK`, del teaser del
+  descuento y de los metadatos de campaña: la simulación no los devuelve. En
+  `run_20260822_020027` la cadena `CantidadBiPrecioMK` aparecía cero veces en el archivo, así que
+  el CSV no podía reproducir su propio veredicto. Un campo `tipo` (`catalogo` / `medicion`) separa
+  las dos puertas. **No es recuperable hacia atrás**
+- **Suite de regresión permanente** en `tests/makro_plazavea/`, 28 casos, ninguno toca la red:
+  `test_precio_mayorista.py` (23 fichas del storefront capturadas a mano — la única verdad
+  EXTERNA del repo, la que no sale de la misma API que el motor está midiendo),
+  `test_precio_en_quiebre.py` (las seis ramas de `price_origin`, filas armadas a mano),
+  `test_propiedades_corrida.py` (invariantes sobre una corrida real, releída desde
+  `raw.jsonl.gz`) y `test_truncamiento.py` (los cuatro casos del techo de paginado)
+
+### Changed
+- **`precio_mayorista = list_price − descuento`**, no `price − descuento` (v18).
+  `SCHEMA_VERSION` 4 → 5 **sin agregar una sola columna**: la columna cambia de significado y la
+  serie va a tener filas de las dos épocas conviviendo, así que un promedio que las mezcle es un
+  promedio de dos definiciones. La fórmula vieja estuvo mal seis semanas sin que nada la delatara,
+  porque donde no hay promoción unitaria `price == list_price` y las dos colapsan en el mismo
+  número: 2021 de las 2328 filas `COMPLETO` de `run_20260822_020027`. Contra las 23 fichas del
+  storefront, la vieja acierta 11/23 y ésta 23/23
+- `descuento_mayorista_pct` pasa a medir el ahorro contra `price`, con base explícita, y `bi_umbral`
+  se vacía solo si el catálogo no lo declara (§6.2 reescrita)
+- **`discount_pct` puede ir vacío** (v20), bajo `LISTA_SIN_PROMO`. `0.00` ahí afirma "no tiene
+  descuento" sobre una promoción que nadie evaluó. Con stock, `0.00` sigue siendo una medición
+  legítima y sobrevive: la misma celda quiere decir dos cosas según el origen
+- **`stock_signal` deja de decir "quiebre"** (v20): `SIN_STOCK_LOCAL_CADENA_CON_STOCK`,
+  `SIN_STOCK_CADENA`, `SIN_STOCK_LOCAL_CADENA_DESCONOCIDA`. "Quiebre" afirma un desabastecimiento
+  temporal de algo que la sucursal normalmente vende, y eso no se midió: puede ser ausencia de
+  surtido. De las 143 filas se verificó **una** a mano (SKU 11566889). Los nombres nuevos dicen lo
+  observado y dejan la causa sin afirmar; la serie la resuelve sola con 30 días de eje temporal
+- `calcular_descuento_pct` y `clasificar_origen_precio` se extraen como funciones puras, para que
+  las reglas se puedan probar sin red. La extracción fue un commit aparte, sin cambio de
+  comportamiento, verificada replayando 3174/3174 filas desde `raw.jsonl.gz`
+- Los cuatro archivos de regresión se mudan de `tests/probes/makro_plazavea/` a
+  `tests/makro_plazavea/`: `probes/` es para sondas exploratorias. En la ubicación vieja no corrían
+  —`RAIZ` resolvía dos niveles arriba de donde debía— y `pytest tests/ -q` terminaba en tres
+  errores de colección
+
+### Fixed
+- **Alcanzar el total declarado no es truncamiento** (v21). `run_20260822_020027` y
+  `run_20260824_154502` quedaron las dos clasificadas `INCOMPLETO_NO_PLANEADO` por
+  `TRUNCAMIENTO_VTEX` con un único fallo, la categoría "Fideos Largos", y el mensaje se contradecía
+  a sí mismo: "quedó truncada en 50 productos: alcanzó el techo de paginado (~2450)". Cuando el
+  total declarado es múltiplo exacto de la ventana, la última página vuelve llena por aritmética y
+  no por corte: la página corta que confirmaría el final no puede existir. Solo el techo de VTEX
+  indica truncamiento — ahí hay productos que existen y no se pudieron pedir. La decisión sale del
+  bucle a `evaluar_fin_de_paginado`, pura. No cambia ninguna columna
+- `-p no:cacheprovider`: pytest ya no deja un `.pytest_cache` en la raíz del repo
+
 ## [1.2.0] - 2026-08-22
 
 ### Added
