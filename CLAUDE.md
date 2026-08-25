@@ -23,17 +23,21 @@ A single-purpose extractor: it pulls per-branch (sucursal) retail prices from Ma
 storefront (`www.makro.plazavea.com.pe`) using Playwright's async `APIRequestContext` to call VTEX's
 public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). The extraction logic is
 still **one file**: a single module inside an installable package. There is no test *runner* wired up, but
-three test files now exist and run standalone — they cover the pure rules, not the network path.
+five regression files now exist, run standalone or under pytest, and cover the pure rules — not the
+network path.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.24-20, SCHEMA_VERSION 6)
+src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-22, SCHEMA_VERSION 6)
 pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
 docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
 CHANGELOG.md                                     released and unreleased changes
 tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
-tests/test_precio_mayorista.py                   23 storefront cards — the only EXTERNAL truth in the repo
-tests/test_precio_en_quiebre.py                  the six branches of price_origin, rows built by hand
-tests/test_propiedades_corrida.py                invariants over a real run, replayed from raw.jsonl.gz
+tests/makro_plazavea/                            the regression suite — permanent, unlike probes/
+tests/makro_plazavea/test_precio_mayorista.py    23 storefront cards — the only EXTERNAL truth in the repo
+tests/makro_plazavea/test_precio_en_quiebre.py   the six branches of price_origin, rows built by hand
+tests/makro_plazavea/test_propiedades_corrida.py invariants over a real run, replayed from raw.jsonl.gz
+tests/makro_plazavea/test_truncamiento.py        the four cases of the pagination ceiling
+tests/makro_plazavea/test_auditoria_mayorista.py the wholesale audit: expectation, propagation, strata
 tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
 ops/                                             operational tools — NOT the engine; they never measure prices
 ops/arbol_categorias.py                          snapshots the category tree and diffs it against the last one
@@ -90,11 +94,16 @@ sense when the series was one mutable file being appended to. With one immutable
 no accumulated file to reset, and the only thing the flag could still delete is closed history. A flag
 whose only possible effect is destroying the past does not get redefined — it gets removed.
 
-**There is no lint/test/build tooling wired up in this repo.** The three `tests/test_*.py` files are
-plain scripts: `python3 tests/test_precio_mayorista.py` (23 storefront cards),
-`python3 tests/test_precio_en_quiebre.py` (the six `price_origin` branches, hand-built rows) and
-`python3 tests/test_propiedades_corrida.py` (invariants over a real run, replayed from `raw.jsonl.gz`;
-skips itself when `data/` is empty). Each prints a report and exits 0/1, and pytest collects them too.
+**There is no lint/test/build tooling wired up in this repo**, but the regression suite is real: 53
+cases under `tests/makro_plazavea/`, run together with `python -m pytest tests/ -q` (pytest is not a
+declared dependency — install it, or run each file on its own). `probes/` is for exploratory probes and
+`tests/makro_plazavea/` for permanent regression; the two are not interchangeable, and each file
+resolves the repo root as `parents[2]` from its own path. The five files:
+`test_precio_mayorista.py` (23 storefront cards), `test_precio_en_quiebre.py` (the six `price_origin`
+branches, hand-built rows), `test_propiedades_corrida.py` (invariants over a real run, replayed from
+`raw.jsonl.gz`; skips itself when `data/` is empty), `test_truncamiento.py` (the pagination ceiling) and
+`test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata). Each also
+prints a report and exits 0/1 when run standalone.
 They test the **pure** functions and the wiring around them — nothing there touches the network, so they
 are not a substitute for a small live run. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10
 --auditoria 0`), then reading the console output, `filas.csv` and `run.json` inside the run's own folder
@@ -316,6 +325,55 @@ day's measurement can distinguish from the SKU simply not being in that branch's
 unasserted; the series settles it on its own, and that inference belongs to the analyst with 30 days of
 time axis in front of them, not to a cell.
 
+## `surtido_makro` does not answer the assortment question (measured 2026-08-25)
+
+The column claims to be "the ONLY proof of Makro assortment for THIS branch"
+(`docs/decisiones_1.1.0.md` §2). It is not. Measured across both runs on disk, it is **collinear with
+`availability` in every single row**:
+
+| run | `SI` / `available` | `NO` / `withoutStock` | exceptions |
+|---|---|---|---|
+| `run_20260822_020027` | 3031 | 143 | **0** |
+| `run_20260824_154502` | 3029 | 143 | **0** |
+
+It is equally collinear with `logistics_status` (`MATCH` / `SIN_STOCK`) and with `fulfillment_type`
+(`tienda` / empty). Four columns, one fact.
+
+**The mechanism — and it is not the one you would guess.** `seller_chain` does not come back *empty*
+when there is no stock; it **collapses to the root seller**:
+
+```
+surtido_makro = SI  ->  seller_chain = "1 > plazaveamko359" (1520) / "1 > plazaveamko360" (1511)
+surtido_makro = NO  ->  seller_chain = "1"                  (143)
+```
+
+The rule is `"SI" if f"plazaveamko{node_id}" in seller_chain else "NO"`. VTEX only appends the branch
+seller once it has resolved a seller that will actually ship, and that requires stock. So the column
+does not ask "is this SKU part of this branch's assortment?" — it asks **"did VTEX resolve this branch
+as a seller today?"**, which is true if and only if there is stock.
+
+**It is collinear, not an alias, and the difference is load-bearing.** A row with stock shipped by the
+root seller or a third party (`MATCH_SELLER_RAIZ`, `OPERADOR_EXTERNO`, dropship) would come back
+`availability = available` with `surtido_makro = NO`. In abarrotes across nodes 359 and 360 that has
+never happened: both runs contain only `MATCH` and `SIN_STOCK` — zero `MATCH_SELLER_RAIZ`, zero
+`OPERADOR_EXTERNO`. The redundancy is a property of *this* sample, not of the definition. Anyone
+"simplifying" the column by pointing it at another field would be fixing the wrong thing.
+
+**It does not get deleted today (§6.5, §6.6).** §6.6 says a column that looks useless is measured for 30
+days before being removed, and one category on two nodes is exactly the thin evidence that rule exists
+to override. §6.5 makes the same argument about this exact case, three years early: `seller_id` stays
+because *"if a marketplace third party shows up it will carry another value"* — which is precisely the
+row that would break the collinearity. **Revisit at 30 days, or when the scope expands past abarrotes to
+another category.** Until then the column stays, redundant and documented.
+
+**The question it was supposed to answer is still open.** "Does this SKU belong to this node's
+assortment?" is answered by **no column in the schema today**, and it will not be answered by a cell.
+Answering it properly means querying the catalog under branch context — a new per-branch request phase,
+which is the cost that scales worst of everything here when 2 branches become 20. The time axis answers
+it for free: a SKU that never appears with stock at a node across 30 days is, with high probability, not
+in that node's assortment. Same reasoning that made v20 rename `QUIEBRE_LOCAL` — the cause is settled by
+the series, not asserted by a cell, and that inference belongs to the analyst.
+
 ## Guiding principle: evidence is cheap insurance, verify instead of trusting
 
 Three separate parser bugs (`all_headers` vs `headers`, a destructive fallback, a `sellerChain` that wrongly
@@ -500,6 +558,9 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   is **not** fully cleared: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
   `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open. Its §12 lists
   `--categorias` as out of scope — that was true for 1.1.0 and stopped being true in 1.2.0, which shipped
-  it as `--categoria`. The document is an inventory of *that* release; don't read it as the current roadmap.
+  it as `--categoria`. Its §2 calls `sellerChain` "the only proof of Makro assortment" — measured false on
+  2026-08-25 (see "`surtido_makro` does not answer the assortment question"); the §2 finding it rests on
+  (the catalog endpoint has no branch context) still holds, the column's claim does not. The document is an
+  inventory of *that* release; don't read it as the current roadmap.
 - `docs/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
   it before re-adding anything this file used to say.
