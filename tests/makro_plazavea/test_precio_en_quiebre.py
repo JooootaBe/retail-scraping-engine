@@ -47,7 +47,7 @@ Dos niveles, a propósito:
     mayorista" con "el escalón se publica".
 
 Nada sale a la red y nada lee un `filas.csv`. Se corre solo
-(`python3 tests/test_precio_en_quiebre.py`) o bajo pytest.
+(`python3 tests/makro_plazavea/test_precio_en_quiebre.py`) o bajo pytest.
 """
 
 from __future__ import annotations
@@ -57,7 +57,8 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[1]
+# tests/makro_plazavea/<archivo>.py -> raíz del repo: dos niveles.
+RAIZ = Path(__file__).resolve().parents[2]
 
 if str(RAIZ / "src") not in sys.path:
     sys.path.insert(0, str(RAIZ / "src"))

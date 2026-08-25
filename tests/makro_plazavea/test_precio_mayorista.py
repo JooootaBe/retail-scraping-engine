@@ -27,7 +27,7 @@ regla — y `a_centavos`, que es como el motor convierte soles a centavos. NO
 reimplementa la aritmética: si este archivo copia la fórmula, deja de ser un
 test del motor y pasa a ser un test de sí mismo.
 
-Se corre solo (`python3 tests/test_precio_mayorista.py`, imprime el informe y
+Se corre solo (`python3 tests/makro_plazavea/test_precio_mayorista.py`, imprime el informe y
 sale 0/1) o bajo pytest.
 """
 
@@ -39,7 +39,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[1]
+# tests/makro_plazavea/<archivo>.py -> raíz del repo: dos niveles.
+RAIZ = Path(__file__).resolve().parents[2]
 
 if str(RAIZ / "src") not in sys.path:
     sys.path.insert(0, str(RAIZ / "src"))

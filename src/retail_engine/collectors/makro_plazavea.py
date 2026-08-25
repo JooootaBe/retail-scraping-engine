@@ -220,7 +220,7 @@ CAMBIOS = [
     " desconocido con página llena sigue truncada (bug de v11, la cabecera"
     " ausente leída como total=0), y una página corta nunca lo fue ·"
     " La decisión sale del bucle a una función pura para poder probarla sin"
-    " red: tests/test_truncamiento.py cubre los cuatro casos a mano.",
+    " red: tests/makro_plazavea/test_truncamiento.py cubre los cuatro casos.",
     "20  el precio en quiebre no es una oferta (TAREA A). Agrega price_origin,"
     " vacía discount_pct sin stock, corta un falso positivo del bi-precio y"
     " renombra stock_signal. SCHEMA_VERSION 5 -> 6, 78 -> 79 columnas ·"

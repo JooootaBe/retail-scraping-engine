@@ -39,7 +39,7 @@ Cómo se engancha al motor
 Contra `evaluar_fin_de_paginado`, la función pura donde vive la decisión.
 Se extrajo del bucle de `descubrir_catalogo` precisamente para esto: la
 regla no se podía probar sin salir a la red. Nada sale a la red y nada lee
-un `filas.csv`. Se corre solo (`python3 tests/test_truncamiento.py`) o bajo
+un `filas.csv`. Se corre solo (`python3 tests/makro_plazavea/test_truncamiento.py`) o bajo
 pytest.
 """
 
@@ -48,7 +48,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[1]
+# tests/makro_plazavea/<archivo>.py -> raíz del repo: dos niveles.
+RAIZ = Path(__file__).resolve().parents[2]
 
 if str(RAIZ / "src") not in sys.path:
     sys.path.insert(0, str(RAIZ / "src"))

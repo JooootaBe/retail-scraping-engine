@@ -4,7 +4,7 @@ Invariantes sobre una corrida real, recalculada con la lógica nueva.
 
 Qué prueba
 ----------
-`tests/test_precio_en_quiebre.py` prueba seis ramas con filas armadas a mano.
+`tests/makro_plazavea/test_precio_en_quiebre.py` prueba seis ramas con filas armadas a mano.
 Esto prueba lo otro: que sobre las 3174 filas de `run_20260822_020027` —una
 corrida de verdad, con la mezcla de casos que trae el catálogo real— la
 lógica nueva no deja pasar ninguna de las cuatro cosas que TAREA A vino a
@@ -58,7 +58,7 @@ respaldo, replicando el mismo orden de fuentes que usa `enriquecer_fila`
 De la corrida siguiente en adelante este archivo puede leer las dos cosas del
 crudo y no necesita ni centinela ni respaldo.
 
-Se corre solo (`python3 tests/test_propiedades_corrida.py`) o bajo pytest.
+Se corre solo (`python3 tests/makro_plazavea/test_propiedades_corrida.py`) o bajo pytest.
 La corrida vive en `data/`, que está en `.gitignore`: si no está, se saltea.
 """
 
@@ -71,7 +71,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[1]
+# tests/makro_plazavea/<archivo>.py -> raíz del repo: dos niveles.
+RAIZ = Path(__file__).resolve().parents[2]
 
 if str(RAIZ / "src") not in sys.path:
     sys.path.insert(0, str(RAIZ / "src"))
