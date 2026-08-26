@@ -30,6 +30,7 @@ network path.
 src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-23, SCHEMA_VERSION 6)
 pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
 docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
+docs/brief_*.md                                  three closed work orders — history, not a roadmap
 CHANGELOG.md                                     released and unreleased changes
 tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
 tests/makro_plazavea/                            the regression suite — permanent, unlike probes/
@@ -40,15 +41,24 @@ tests/makro_plazavea/test_truncamiento.py        the four cases of the paginatio
 tests/makro_plazavea/test_auditoria_mayorista.py the wholesale audit: expectation, propagation, strata
 tests/makro_plazavea/test_estado_por_corrida.py  run-scoped globals survive their own reset
 tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
+tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv   the 23 hand-captured cards test_precio_mayorista.py reads
 ops/                                             operational tools — NOT the engine; they never measure prices
 ops/arbol_categorias.py                          snapshots the category tree and diffs it against the last one
+ops/obtener_nodo_logistico_mk.py                 captures a branch's live logistics signature (headed, standalone)
 data/                                            generated output (gitignored, `.gitignore:32`)
 ```
 
-`ops/` is a deliberate boundary, not a folder for leftovers. Anything there runs by hand or by cron, imports
-from the engine and never modifies it, and answers a question *about* the catalog rather than extracting from
-it. `arbol_categorias.py` is the first: it exists because a new category is a commercial signal — someone on
-the other side decided to start selling something — and until now it entered the traversal in silence.
+`ops/` is a deliberate boundary, not a folder for leftovers. Anything there runs by hand or by cron, never
+modifies the engine and is never imported *by* it, and answers a question *about* the catalog or a branch
+instead of extracting prices. Note the contract is one-directional: an ops tool may import the engine, but
+it does not have to. Two live there today.
+
+`arbol_categorias.py` does import the engine, and exists because a new category is a commercial signal —
+someone on the other side decided to start selling something — and until now it entered the traversal in
+silence. `obtener_nodo_logistico_mk.py` imports nothing from `retail_engine` (only Playwright, headed): it
+captures a branch's real logistics signature from a live checkout, which is the evidence a new `NODOS` entry
+needs *before* it is trusted — see "Scaling to 20+ branches", where the cost of a wrong signature is a branch
+that looks covered and contributes zero verified prices.
 
 The project exists to build a time series of prices per SKU per branch so a pricing analyst can compare
 branches later in SQL/pandas. **The extractor itself never compares branches and never drops rows** —
@@ -100,13 +110,19 @@ cases under `tests/makro_plazavea/`, run together with `python -m pytest tests/ 
 declared dependency — install it, or run each file on its own). `probes/` is for exploratory probes and
 `tests/makro_plazavea/` for permanent regression; the two are not interchangeable, and each file
 resolves the repo root as `parents[2]` from its own path. The six files:
-`test_precio_mayorista.py` (23 storefront cards), `test_precio_en_quiebre.py` (the six `price_origin`
-branches, hand-built rows), `test_propiedades_corrida.py` (invariants over a real run, replayed from
-`raw.jsonl.gz`; skips itself when `data/` is empty), `test_truncamiento.py` (the pagination ceiling) and
-`test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata) and
+`test_precio_mayorista.py` (23 storefront cards, read from
+`tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv`), `test_precio_en_quiebre.py` (the six
+`price_origin` branches, hand-built rows), `test_propiedades_corrida.py` (invariants over a real run,
+replayed from `raw.jsonl.gz`; skips itself when `data/` is empty), `test_truncamiento.py` (the pagination
+ceiling) and `test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata) and
 `test_estado_por_corrida.py` (the run-scoped globals, whose reset lived unreachable inside `main()`
 until v23). Each also
 prints a report and exits 0/1 when run standalone.
+
+**59 is the count of `test_` functions, which is what pytest reports.** Running the six files standalone
+prints 81 instead, because `test_precio_mayorista.py` is a *single* function asserting over its 23 cards.
+Both numbers are right and they measure different things — don't "correct" one against the other.
+
 They test the **pure** functions and the wiring around them — nothing there touches the network, so they
 are not a substitute for a small live run. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10
 --auditoria 0`), then reading the console output, `filas.csv` and `run.json` inside the run's own folder
@@ -549,8 +565,15 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
 
 ## Notes for future sessions
 
-- **This file and `docs/decisiones_1.1.0.md` are the only authoritative context documents in-repo.** No
-  other narrative or roadmap document exists — don't cite section numbers from one.
+- **This file and `docs/decisiones_1.1.0.md` are the only authoritative context documents in-repo.**
+  Everything else under `docs/` is closed history, not a roadmap — don't cite section numbers from one as
+  if they were current, and don't act on a brief without checking git first.
+- `docs/brief_correccion_mayorista.md`, `docs/brief_tareas_bloqueantes.md` and
+  `docs/brief_tres_correcciones.md` are **all three closed**, despite reading as open work orders. Each
+  shipped: the wholesale base in v18 (`a84a3e5`), TAREA B's discovery raw in v19 (`10c0983`) and TAREA A's
+  stockout price in v20, and the truncation / audit / `surtido_makro` trio in `8569056`, `03e2189` and
+  `a2b6775`. They stay because they record what evidence forced each change. Read as pending, they would
+  cause finished work to be redone.
 - `CLAUDE.md` is **tracked by git**: every edit lands in the history and in a PR diff. Treat it as source,
   not as scratch. `.gitignore` covers `.env`, `data/`, `graphify-out/`, `.vscode/` and build artifacts.
 - `graphify-out/` holds a generated knowledge graph of this repo (`graph.html`, `GRAPH_REPORT.md`) — useful
