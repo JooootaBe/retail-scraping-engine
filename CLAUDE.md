@@ -22,12 +22,12 @@ branches").
 A single-purpose extractor: it pulls per-branch (sucursal) retail prices from Makro Perú's VTEX-powered
 storefront (`www.makro.plazavea.com.pe`) using Playwright's async `APIRequestContext` to call VTEX's
 public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). The extraction logic is
-still **one file**: a single module inside an installable package. There is no test *runner* wired up, but
-six regression files now exist, run standalone or under pytest, and cover the pure rules — not the
-network path.
+still **one file**: a single module inside an installable package. Six regression files cover the pure
+rules — under pytest or standalone, none of them touching the network — so they are the first check on a
+change and never the last one.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-23, SCHEMA_VERSION 6)
+src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-23, SCHEMA_VERSION 6, 79 columns)
 pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
 docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
 docs/brief_*.md                                  three closed work orders — history, not a roadmap
@@ -88,7 +88,11 @@ measured; deterministic hash selection), `--por-categoria N` (max SKUs per subca
 `--presupuesto-descubrimiento N` (request budget reserved for discovery only), `--tope N` (hard request
 cap per run; 0 = auto), `--intervalo` (seconds between requests, default 1.5), `--reintentos` (429/5xx
 retries, default 3), `--auditoria PCT` (% of measurements cross-checked simulation vs orderForm, default
-5, 0 disables), `--sin-evidencia` (skip archiving raw JSON), `--headed` / `--canal`.
+5, 0 disables), `--sin-evidencia` (skip archiving raw JSON), `--modo simulation|orderform` (1 request vs
+the 3-request flow), `--salida` (collector root; the run folder is still created inside it), `--version`
+(prints `VERSION` + `CAMBIOS` and exits, no network), `--headed` / `--canal`. With `--categoria`, `--skus`,
+`--dry-run` and `--auditoria-mayorista` below, that is the whole argparse surface — 19 flags. If you add
+one, it belongs in this paragraph or in one below it, not only in the `--help`.
 
 1.2.0 added `--categoria "/399/,/77/"` — see "Guiding principle: scope is chosen, not inherited from
 the tree" below; it is the flag with the most reasoning behind it.
@@ -105,11 +109,19 @@ sense when the series was one mutable file being appended to. With one immutable
 no accumulated file to reset, and the only thing the flag could still delete is closed history. A flag
 whose only possible effect is destroying the past does not get redefined — it gets removed.
 
-**There is no lint/test/build tooling wired up in this repo**, but the regression suite is real: 59
-cases under `tests/makro_plazavea/`, run together with `python -m pytest tests/ -q` (pytest is not a
-declared dependency — install it, or run each file on its own). `probes/` is for exploratory probes and
-`tests/makro_plazavea/` for permanent regression; the two are not interchangeable, and each file
-resolves the repo root as `parents[2]` from its own path. The six files:
+**The regression suite is the first step in verifying any change.** 59 `test_` functions across six
+files under `tests/makro_plazavea/`, none of which touches the network:
+
+```bash
+python -m pytest tests/ -q                              # all six at once
+python3 tests/makro_plazavea/test_precio_mayorista.py   # each file also runs standalone, exits 0/1
+```
+
+No lint or build tooling is wired up, and **pytest is not a declared dependency** — install it, or run
+each file on its own. `probes/` is for exploratory probes and `tests/makro_plazavea/` for permanent
+regression; the two are not interchangeable — a probe may be edited or thrown away, a regression file is
+a promise — and each regression file resolves the repo root as `parents[2]` from its own path. The six
+files:
 `test_precio_mayorista.py` (23 storefront cards, read from
 `tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv`), `test_precio_en_quiebre.py` (the six
 `price_origin` branches, hand-built rows), `test_propiedades_corrida.py` (invariants over a real run,
@@ -123,11 +135,14 @@ prints a report and exits 0/1 when run standalone.
 prints 81 instead, because `test_precio_mayorista.py` is a *single* function asserting over its 23 cards.
 Both numbers are right and they measure different things — don't "correct" one against the other.
 
-They test the **pure** functions and the wiring around them — nothing there touches the network, so they
-are not a substitute for a small live run. Verify a change by running the engine small (`--catalogo 60 --por-categoria 2 --muestra 10
---auditoria 0`), then reading the console output, `filas.csv` and `run.json` inside the run's own folder
-under `data/makro_plazavea/`. Check the process exit code — it is meaningful (see "Budget exhaustion is a
-global failure").
+They test the **pure** functions and the wiring around them. That is a real first step and it is not the
+whole of it: nothing there touches the network, so a green suite says the rules are intact, not that the
+run works. **Complement it — never replace it — with a small live run:** `--catalogo 60 --por-categoria 2
+--muestra 10 --auditoria 0`, then read the console output, `filas.csv` and `run.json` inside the run's own
+folder under `data/makro_plazavea/`. Check the process exit code — it is meaningful (see "Budget
+exhaustion is a global failure"). v23 is why the order matters in both directions: the 53 tests of v22
+were green and its first live run died in the audit loop on a `KeyError`, because the phase was covered
+and its initialisation was not.
 
 For a change that touches extraction rules, the sharper test is the acceptance criterion of
 `docs/decisiones_1.1.0.md` §10: re-measure the 20 SKUs of `golden_v5.csv` with `--skus` and diff against
@@ -158,8 +173,14 @@ Three defenses exist and must stay intact when bumping versions:
 When bumping: update `VERSION` (`YYYY.MM.DD-NN`) and prepend a changelog
 entry to `CAMBIOS` describing what changed. Bump `SCHEMA_VERSION` only if you add/remove/rename a `Fila`
 field — it's written into every row so a CSV from six months ago can say what rules it was born under.
-v13 and v14 deliberately kept it at `"3"` because no field changed; v15 raised it to `"4"` when the 22
-wholesale columns landed (56 → 78). Since each run now writes its own file, a schema change no longer
+The chronology, because the interesting bump is the one that added nothing: v13 and v14 deliberately
+kept it at `"3"` because no field changed; v15 raised it to `"4"` when the 22 wholesale columns landed
+(56 → 78); **v18 raised it to `"5"` without adding a single column**, because `precio_mayorista` changed
+meaning (`price − descuento` → `list_price − descuento`) and a series holding rows from both eras would
+average two different definitions; v20 raised it to `"6"` with `price_origin` (78 → 79). Today: `"6"`,
+79 columns. So a change of *meaning* counts as a schema change even when the header is byte-identical —
+that is the case people forget, and v18 is the precedent. Since each run now writes its own file, a
+schema change no longer
 risks corrupting an existing one — but `schema_version` is still what tells a consolidation layer which
 runs it may safely `UNION`.
 If an older engine file is ever kept next to the current collector, do not delete it — it documents
@@ -452,10 +473,30 @@ What belongs here is the epistemics, because it is easy to get wrong twice:
 - When the measured price disagrees with the reconstructed one, the **measured** value wins (it is what the
   customer pays), the row is flagged `DQ_MAYORISTA_DISCREPA`, and `descuento_monto` is left untouched —
   the disagreement between what VTEX *declared* and what it *charges* is the finding, so erasing either side
-  would erase it. This has not happened yet: the formula is exact at thresholds 2, 3, 4, 12, 15 and 24
-  (§11), the full range observed in this catalog. That is not the same as every possible threshold.
+  would erase it.
+- **It has fired exactly once, and the audit was the side that was wrong.** SKU 10012680 in
+  `run_20260822_020027`, threshold 3: VTEX charged 88.00 — exactly its own `price`, against a `list_price`
+  of 118.50. Nothing disagreed. The unit promotion simply beat the declared step, and the audit was
+  comparing against an expectation that didn't apply. Read a `DQ_MAYORISTA_DISCREPA` as *"one of these two
+  sides is wrong"*, never as *"VTEX is wrong"* — the flag names a contradiction, not a culprit.
+- **There are two expectations at `qty = bi_umbral`, not one, and that is the whole content of
+  `BIPRECIO_SUPERADO_POR_PROMO`.** When `list_price − descuento >= price`, the declared step is worse than
+  the promotion already running at `qty=1`, so it is neither published nor charged, and the price to expect
+  is `price` itself — not the reconstruction. That state therefore *predicts a number*, which is what makes
+  it auditable, and until v22 it was the only bi-price assertion nothing verified.
+  `BIPRECIO_PUBLICACION_INDETERMINADA` is excluded from the audit for the mirror-image reason: with no stock
+  VTEX quotes no quantity at all, so there is nothing to compare and counting it would manufacture
+  agreement out of silence. The states themselves are `docs/decisiones_1.1.0.md` §5's to define (its enum
+  is annotated there as superseded); what belongs here is the rule that produced them — a status that
+  predicts a price must be audited, and one that predicts nothing must never be scored as a pass.
+- **The threshold range verified under the *current* formula is narrower than §11 reads.** §11's 12 / 15 /
+  24 evidence was measured on 2026-08-21 and 2026-08-22 under the pre-v18 base, and a passing audit of a
+  superseded formula does not transfer to its replacement. Since v18 the audits on disk cover thresholds
+  **2, 3, 4 and 20**, against a catalog that declares 2, 3, 4, 6, 10, 12, 13, 15 and 20 — so 6, 10, 12, 13
+  and 15 are unverified today. Cite §11 as the record of what was checked *then*.
 - The audit samples for **threshold coverage**, not representativeness — one low, the highest available,
-  then unseen thresholds. Three audits of the same threshold prove the formula for that threshold only.
+  then unseen thresholds — and since v22 it also stratifies by unit promotion, which is the axis where the
+  formula actually broke. Three audits of the same threshold prove the formula for that threshold only.
 
 ## Architecture (`src/retail_engine/collectors/makro_plazavea.py`, single file, top to bottom)
 
@@ -570,6 +611,31 @@ data/makro_plazavea/
   stays readable with `tail` at a thousand runs.
 - The engine **never writes exports**. Per-branch or per-category slices come from a separate command.
 
+### Columns that can come back structurally empty
+
+Five columns are empty in **every** row of every run on disk — measured 2026-08-26 over 9,528 rows across
+the four runs that have a `filas.csv`. All five are declared `str = ""` in `Fila`, so a consolidation
+layer that infers types from a sample will type them float/`NaN` and then compare them against `""` and
+find nothing. Same rule as the monetary fields, applied to the type: **empty means unknown**, and a
+zero — or a `NaN` — never stands in for an unknown.
+
+| column | fills when |
+|---|---|
+| `postal_resolved` | the row came from an **orderForm** response (`--modo orderform`, or the per-SKU fallback). `simulation` returns no `shippingData` at all, so the default mode never fills it. |
+| `neighborhood_resolved` | same source, same condition. |
+| `sla_selected` | VTEX marks a `selectedSla` — which `simulation` never does *by design*, not out of ambiguity. That is exactly why a single SLA counts as confirmed; see "finding the warehouse is not confirming the dispatch". |
+| `polygon_drift` | the returned `polygonName` differs from the one recorded in `NODOS` for that node. |
+| `error` | HTTP ≥ 400, a `__error` inside a 200 body, or a per-SKU exception. All four runs had none of the three, which is the good outcome, not a gap. |
+
+**None of the five is a dead code path.** The address pair and `error` are reachable from the orderForm
+and failure paths; `--auditoria`'s orderForm responses do carry a populated `shippingData.address`, read
+for reconciliation and then discarded, so the value exists and simply isn't the row's. `docs/decisiones_1.1.0.md`
+§11 already carries the fill rate of `postal_resolved` / `neighborhood_resolved` as a 30-day open question.
+
+**`dq_flags` is not one of them, and it is the trap.** It carries `DQ_MAYORISTA_DISCREPA` in exactly one
+row of `run_20260822_020027` — non-empty 1 time in 9,528. A single run will show it 100% empty and a
+sampler will almost certainly agree; both are wrong. Type it from `Fila`, never from a sample.
+
 The analyst does the cross-branch comparison downstream (SQL/pandas over the long CSV) — do not add
 cross-branch comparison logic to this engine, at 2 branches or at 20.
 
@@ -583,9 +649,10 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   shipped: the wholesale base in v18 (`a84a3e5`), TAREA B's discovery raw in v19 (`10c0983`) and TAREA A's
   stockout price in v20, and the truncation / audit / `surtido_makro` trio in `8569056`, `03e2189` and
   `a2b6775`. They stay because they record what evidence forced each change, and each now opens with a
-  blockquote saying so. Read as pending, they would cause finished work to be redone. One real open item
-  survives them: `surtido_makro` was measured redundant and deliberately **not** deleted — revisit at 30
-  days, or when scope leaves abarrotes.
+  blockquote saying so. Read as pending, they would cause finished work to be redone. Two real open items
+  survive them: `surtido_makro` was measured redundant and deliberately **not** deleted (revisit at 30
+  days, or when scope leaves abarrotes), and thresholds 6, 10, 12, 13 and 15 have no audit under the
+  post-v18 wholesale formula.
 - `CLAUDE.md` is **tracked by git**: every edit lands in the history and in a PR diff. Treat it as source,
   not as scratch. `.gitignore` covers `.env`, `data/`, `graphify-out/`, `.vscode/` and build artifacts.
 - `graphify-out/` holds a generated knowledge graph of this repo (`graph.html`, `GRAPH_REPORT.md`) — useful
@@ -595,8 +662,10 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   them here, where the two copies would drift apart. Consult it before proposing changes — but read it as
   the record of *that* release, not as the current roadmap. **Its superseded parts are annotated in place**
   (a blockquote at each one): the wholesale formula in §1 and §5, the assortment claim in §2, the 78-column
-  count and the `biprecio_status` enum in §5, and `--categorias` in §12. Its §9 bug table is **not** fully
-  cleared either: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
+  count and the `biprecio_status` enum in §5, and `--categorias` in §12. **§11 is not annotated and should
+  be**: its "resuelta en todo el rango observado (2 a 24)" was measured under the pre-v18 formula, so it
+  records what was verified then, not what is verified now — see "the wholesale price is reconstructed".
+  Its §9 bug table is **not** fully cleared either: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
   `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open.
 - `docs/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
   it before re-adding anything this file used to say.

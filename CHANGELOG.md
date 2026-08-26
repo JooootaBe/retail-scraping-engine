@@ -122,6 +122,41 @@ Seis versiones del motor desde 1.2.0 — v18 a v23 — y dos de ellas mueven `SC
   bucle a `evaluar_fin_de_paginado`, pura. No cambia ninguna columna
 - `-p no:cacheprovider`: pytest ya no deja un `.pytest_cache` en la raíz del repo
 
+### Documentación
+- **`CLAUDE.md` se sincroniza contra el código, no contra sí mismo.** Se declaraba "el único
+  documento mantenido al día por diseño" mientras `README.md` estaba más actualizado que él.
+  Verificado contra la fuente: 7085 líneas de colector, `VERSION 2026.08.25-23`,
+  `SCHEMA_VERSION 6`, 79 columnas (`len(Fila().__dict__)`), paquete 1.2.0, 59 funciones `test_`,
+  19 flags de argparse. `README.md` quedó correcto en los seis valores y no se tocó
+- La cronología de `SCHEMA_VERSION` llegaba hasta v15 (`4`, 56 → 78). Se completa: **v18 sube a
+  `5` sin agregar una sola columna** —`precio_mayorista` cambia de significado— y v20 sube a `6`
+  con `price_origin` (78 → 79). El caso que se olvida es el de v18: un cambio de *significado*
+  cuenta como cambio de esquema aunque el header salga idéntico byte a byte
+- La sección de verificación arrancaba con "no hay tooling de lint/test/build". Ahora arranca con
+  la suite —es el primer paso— y la corrida chica en vivo queda como complemento explícito, no
+  como sustituto. v23 justifica el orden en los dos sentidos: los 53 tests de v22 en verde y su
+  primera corrida en vivo muerta en el bucle de auditoría
+- El párrafo de flags cubría 16 de los 19; entran `--modo`, `--salida` y `--version`, que solo
+  vivían en el bloque de ejemplos
+- **`DQ_MAYORISTA_DISCREPA` sí se disparó**, y `CLAUDE.md` afirmaba que no. Una vez: SKU 10012680
+  de `run_20260822_020027`, umbral 3, y el lado equivocado era la auditoría (v22). La epistemología
+  de `BIPRECIO_SUPERADO_POR_PROMO` —que hay **dos** expectativas a `qty = bi_umbral`, no una, y que
+  por eso ese estado es auditable mientras `BIPRECIO_PUBLICACION_INDETERMINADA` no lo es— no estaba
+  en ninguna parte de `CLAUDE.md`. Se agrega ahí como regla, no como lista de columnas: esas las
+  posee `docs/decisiones_1.1.0.md` §5
+- **El rango de umbrales verificado bajo la fórmula actual es más chico de lo que dice §11.** Su
+  evidencia de 12 / 15 / 24 se midió con la base pre-v18: una auditoría aprobada de una fórmula
+  superseded no se hereda. Las auditorías en disco desde v18 cubren 2, 3, 4 y 20, contra un catálogo
+  que declara 2, 3, 4, 6, 10, 12, 13, 15 y 20. Queda anotado como ítem abierto; §11 **no** se editó
+- **Columnas estructuralmente vacías**, nueva nota en la sección de salida. Medido sobre 9.528 filas
+  de las cuatro corridas con `filas.csv`: `postal_resolved`, `neighborhood_resolved`, `sla_selected`,
+  `polygon_drift` y `error` están vacías en el 100% de las filas, las cinco declaradas `str = ""` en
+  `Fila`. Ninguna es camino muerto —las tres primeras dependen de orderForm o de que VTEX elija SLA,
+  y la respuesta de orderForm de `--auditoria` sí trae la dirección, se lee para reconciliar y se
+  descarta. Se documenta porque una capa de consolidación que infiera tipos desde una muestra las va
+  a tipar float/`NaN`, y acá vacío = desconocido. **`dq_flags` no es una de ellas**: no vacía 1 de
+  9.528 veces, que es el caso más difícil para un inferidor de tipos
+
 ## [1.2.0] - 2026-08-22
 
 ### Added
