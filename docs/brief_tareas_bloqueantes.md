@@ -1,5 +1,14 @@
 # Brief — las dos correcciones que no son retroactivas
 
+> **CERRADO — las dos shipearon.** (nota agregada 2026-08-26)
+>
+> TAREA B (el crudo del catálogo) en v19, commit `10c0983`. TAREA A (el precio en quiebre) en v20,
+> que agregó `price_origin`, el estado `BIPRECIO_PUBLICACION_INDETERMINADA`, la quinta regla
+> `DQ_SIN_STOCK_CON_DESCUENTO` y el renombre de `QUIEBRE_LOCAL`, y subió `SCHEMA_VERSION` de 5 a 6.
+> Cubiertas por `test_precio_en_quiebre.py` y `test_propiedades_corrida.py`. Se conserva por el
+> argumento que lo abre —que estas dos producen días irreparables y casi ningún otro defecto lo
+> hace—, que sigue siendo el criterio para priorizar. **No hay nada que ejecutar acá.**
+
 Para pasar a Claude Code. Contexto: `retail_scraping_engine`, colector `makro_plazavea`,
 después de la corrección de la fórmula del mayorista (`SCHEMA_VERSION 5`).
 

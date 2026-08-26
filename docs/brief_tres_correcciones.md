@@ -1,5 +1,17 @@
 # Brief — tres correcciones rápidas
 
+> **CERRADO — las tres shipearon.** (nota agregada 2026-08-26)
+>
+> (1) El falso positivo de truncamiento en v21, commit `8569056`, con la decisión extraída a
+> `evaluar_fin_de_paginado` y `test_truncamiento.py`. (2) La auditoría del mayorista en v22,
+> commit `03e2189`, con `test_auditoria_mayorista.py`. (3) `surtido_makro` se resolvió como
+> documentación en `a2b6775`: se midió colineal con `availability`, y **no se eliminó** — §6.6
+> pide 30 días de medición antes de sacar una columna. Ésa es la única de las tres que dejó algo
+> pendiente: **revisar a los 30 días, o al salir de abarrotes.**
+>
+> El conteo de "los 21 tests actuales" que pide más abajo es de la fecha del brief; hoy son 59.
+> **No hay nada que ejecutar acá**, salvo la revisita de `surtido_makro`.
+
 Para pasar a Claude Code. Contexto: `retail_scraping_engine`, colector `makro_plazavea`,
 después de `SCHEMA_VERSION 6`.
 

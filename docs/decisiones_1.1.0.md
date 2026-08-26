@@ -5,6 +5,18 @@ verificado contra evidencia; lo que es supuesto está marcado como tal.
 
 **Alcance:** agregar el precio mayorista y corregir bugs conocidos. Nada más.
 
+> **Documento cerrado — leer como historia, no como estado actual.** (nota agregada 2026-08-26)
+>
+> Es el inventario de lo que entró en **1.1.0**, y se conserva tal como se escribió: es el
+> registro de qué reglas rigieron las filas de esa época, que es exactamente lo que
+> `schema_version` sirve para decidir después. **No se reescribe.** Lo que versiones
+> posteriores cambiaron está anotado en el punto donde ocurre, con un bloque como éste.
+>
+> Superado desde entonces: la **fórmula del mayorista** (§1, §5), la afirmación sobre
+> **surtido** (§2), el **conteo de columnas y el enum `biprecio_status`** (§5) y el
+> **fuera de alcance de `--categorias`** (§12). El estado vigente vive en `CLAUDE.md` y en la
+> sección `[Sin publicar]` de `CHANGELOG.md`.
+
 ---
 
 ## 1. Bi-precio: mecanismo verificado
@@ -13,6 +25,25 @@ verificado contra evidencia; lo que es supuesto está marcado como tal.
 precio_mayorista = commertialOffer.Price − PromotionalPriceTableItemsDiscount
 umbral           = CantidadBiPrecioMK   (specification del producto)
 ```
+
+> **SUPERADO en v18 — la base es `list_price`, no `price`.** (nota agregada 2026-08-26)
+>
+> ```
+> precio_mayorista = list_price − PromotionalPriceTableItemsDiscount
+> ```
+>
+> La fórmula de arriba estuvo mal seis semanas sin que nada la delatara, porque donde no hay
+> promoción unitaria `price == list_price` y las dos colapsan en el mismo número: 2021 de las
+> 2328 filas `COMPLETO` de `run_20260822_020027`. Contra las 23 fichas del storefront capturadas
+> a mano, la de arriba acierta **11/23** y la corregida **23/23**.
+>
+> Las cinco verificaciones de la tabla de abajo siguen siendo válidas: son SKUs sin promoción
+> unitaria, donde ambas fórmulas dan lo mismo. Eso es justamente lo que las hizo insuficientes
+> como evidencia. Ver `docs/brief_correccion_mayorista.md`, commit `a84a3e5`, y
+> `tests/makro_plazavea/test_precio_mayorista.py`, que fija las 23 fichas como regresión.
+>
+> **El resto de §1 no cambió**: la fuente del umbral, el escalón único, `CantidadTriPrecioMK`,
+> el teaser como fuente del régimen, `priceTags` como detector y el redondeo al centavo.
 
 Verificado al centavo en 5 SKUs, remedidos contra checkout:
 
@@ -70,6 +101,24 @@ VTEX, que es de Plaza Vea. Una sonda que usó solo catálogo produjo 1157 filas 
   tienda VTEX completa.
 - La única prueba de surtido Makro es `sellerChain` conteniendo `plazaveamko<nodo>`
   **después** de medir con `simulation`.
+
+> **SUPERADO — medido falso el 2026-08-25.** (nota agregada 2026-08-26)
+>
+> `surtido_makro` no responde la pregunta de surtido: es **colineal con `availability` en todas
+> las filas** de las dos corridas en disco (3031/143 y 3029/143, cero excepciones). El mecanismo
+> es que `seller_chain` no viene vacío sin stock, **colapsa a la raíz** (`"1"`), y VTEX solo
+> agrega el seller de sucursal cuando resolvió un vendedor que despacha — lo cual requiere stock.
+> Así que la columna pregunta "¿VTEX resolvió esta sucursal como vendedor hoy?", que es cierto si
+> y solo si hay stock.
+>
+> Colineal **no es alias**: una fila con stock despachada por el seller raíz o un tercero saldría
+> `available` con `surtido_makro = NO`, y eso no pasó nunca en abarrotes sobre 359 y 360. La
+> redundancia es propiedad de la muestra, no de la definición, así que la columna **no se elimina**
+> (§6.5, §6.6). Detalle completo en `CLAUDE.md`, sección "`surtido_makro` does not answer the
+> assortment question", y commit `a2b6775`.
+>
+> El hallazgo del que cuelga este §2 —que el endpoint de catálogo no tiene contexto de sucursal—
+> sigue siendo cierto. Lo que no se sostiene es la conclusión de que `sellerChain` lo suple.
 - Las filas que no lo cumplen **se escriben igual**, marcadas. No se descartan en silencio.
 
 ---
@@ -126,6 +175,19 @@ como está; `price_per_unit`, `precio_por_unidad_base` y `precio_mayorista_por_u
 
 9 + 4 + 4 + 5. Con las 56 del motor: 56 + 22 = **78**, que es exactamente el header de
 `golden_v5.csv`.
+
+> **Hoy son 79.** (nota agregada 2026-08-26) v20 agregó `price_origin` y subió `SCHEMA_VERSION`
+> de 5 a 6. El 78 de arriba es correcto **para el golden y para las filas de 1.1.0**, y por eso
+> no se toca: es lo que permite que un CSV de esa época diga bajo qué reglas nació.
+>
+> Dos correcciones más de esta sección:
+> - `precio_mayorista_cents` ya **no** es `price_cents − descuento_monto_cents` sino
+>   `list_price_cents − descuento_monto_cents` (v18, ver la nota de §1), y
+>   `descuento_mayorista_pct` mide el ahorro contra `price` con base explícita.
+> - El enum `biprecio_status` ganó dos estados que no están en la lista de abajo:
+>   **`BIPRECIO_SUPERADO_POR_PROMO`** (v18 — si `list_price − descuento >= price`, el escalón no
+>   se publica ni se cobra) y **`BIPRECIO_PUBLICACION_INDETERMINADA`** (v20 — sin stock el precio
+>   se calcula igual, pero la regla de publicación no se puede evaluar).
 
 ### Bi-precio (9)
 
@@ -370,6 +432,25 @@ Ese resultado vale doble: confirma que `golden_v5.csv` **sirve como baseline** �
 logística, el umbral bi, `biprecio_status` y `ean_type` no se movieron entre las dos
 corridas— y que las otras 74 columnas comparables son estables al día.
 
+> **Hoy este criterio cierra en 38/40, no en 40/40, y eso es lo correcto.** (nota agregada
+> 2026-08-26)
+>
+> El golden se produjo con la fórmula pre-v18 (ver la nota de §1), así que las columnas de
+> mayorista quedaron desactualizadas **solo** donde `price != list_price`, que es donde las dos
+> fórmulas dejan de colapsar en el mismo número. Medido sobre el archivo: son exactamente **2 de
+> las 40 filas**, el SKU `10926867` en los nodos 359 y 360, con `price` 6.90 contra `list_price`
+> 7.00 y `precio_mayorista` 6.60 donde v18 da 6.70.
+>
+> Se agrega entonces un **cuarto grupo de exclusión, por cambio de regla**: `precio_mayorista`,
+> `precio_mayorista_cents` y `descuento_mayorista_pct`, **limitado a esas dos filas**. Un diff en
+> esas columnas fuera de ellas, o en cualquier otra columna, sigue siendo una regresión real.
+>
+> El golden **no se regenera**, por el mismo argumento con que I1 resolvió
+> `precio_por_unidad_base` en `docs/contradicciones.md`: un baseline que se reescribe cada vez que
+> cambian las reglas deja de ser un baseline. Lo que sí lo reemplaza como prueba de la fórmula son
+> las 23 fichas de `fichas_publicadas_20260822.csv`, que son evidencia externa y no una corrida
+> del propio motor.
+
 **3. Cambiadas por diseño** — el golden es anterior a la decisión y no se regenera:
 
 - `price_per_unit`, `precio_por_unidad_base` y `precio_mayorista_por_unidad_base` (§4: se leen
@@ -426,7 +507,8 @@ evidencia de qué medía el motor antes de estos cambios y no se reemplaza para 
 No entra en 1.1.0, aunque parezca cercano:
 
 - `assortment_status` y descubrimiento por nodo (distingue *no listado* de *no despachable*)
-- Flag `--categorias` y descubrimiento del árbol de categorías
+- Flag `--categorias` y descubrimiento del árbol de categorías — **ya no: shipeó en 1.2.0 como
+  `--categoria`** (nota agregada 2026-08-26). El resto de esta lista sigue fuera de alcance.
 - Parquet y PostgreSQL
 - Colector `makro_pe`
 - `presentacion_confianza`, `brand_dq` y `es_marca_propia` — propuestas sin medición detrás;

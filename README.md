@@ -12,10 +12,16 @@ answered, and how sure the engine is about it. Correctness before coverage.
 | Collector | Retailer | State |
 |---|---|---|
 | `makro_plazavea` | Makro Perú (VTEX storefront) | working — 2 branches: 359 Santa Anita, 360 Surco |
-| `makro_pe` | Makro Perú, other source | planned, explicitly out of scope for 1.1.0 |
+| `makro_pe` | Makro Perú, other source | not started, and deliberately so |
 
-Version 1.0.0. Work on 1.1.0 (wholesale / bi-price) is in progress and changes the output
-layout — see the pointers below before building anything on top of the current CSVs.
+Package version **1.2.0**; engine version `2026.08.25-23`, `SCHEMA_VERSION 6`, 79 columns per row.
+1.1.0 shipped the wholesale (bi-price) columns and the one-folder-per-run layout; 1.2.0 added
+`--categoria`. Six engine versions since — v18 through v23 — are **released in git but not tagged
+as a package release**; two of them move `SCHEMA_VERSION` (4 → 5 in v18, 5 → 6 in v20), so read
+`CHANGELOG.md`'s `[Sin publicar]` section before consolidating runs from different dates.
+
+The two branches are a decision, not a limitation: branch attribution is proven correct on a small
+set of nodes before more are added. `CLAUDE.md` explains why, and what it costs to add the 21st.
 
 ## Install
 
@@ -34,13 +40,42 @@ That discovers up to 300 SKUs, caps each subcategory at 3, and measures 100 of t
 every configured branch. `--version` prints the engine version and its changelog without
 touching the network. The full flag list is in `CLAUDE.md`.
 
+Output lands in `data/makro_plazavea/run_<YYYYMMDD_HHMMSS>/` — one immutable folder per run,
+holding `filas.csv`, `run.json` and `raw.jsonl.gz`. Reading the whole history is a glob over
+`run_*/filas.csv`. The process exit code is meaningful: 0 complete, 1 the run delivered less than
+its selection promised, 2 bad arguments or missing Playwright, 130 Ctrl-C.
+
+## Tests
+
+59 `test_` functions under `tests/makro_plazavea/`, none of which touch the network. Pytest is not
+a declared dependency; each file also runs standalone and exits 0/1:
+
+```bash
+python3 tests/makro_plazavea/test_precio_mayorista.py
+python -m pytest tests/ -q                              # if pytest is installed
+```
+
+`tests/probes/` holds exploratory probes, not regression — the two are not interchangeable.
+
+## Layout
+
+```
+src/retail_engine/collectors/makro_plazavea.py   the engine
+ops/                                             operational tools; they never measure prices
+tests/makro_plazavea/                            the regression suite
+tests/fixtures/makro_plazavea/                   golden baseline + 23 hand-captured storefront cards
+data/                                            generated output (gitignored)
+```
+
 ## Where things are documented
 
 - `CLAUDE.md` — guiding principles, architecture, and how to run and verify a change. Read it
-  before touching extraction logic.
-- `docs/decisiones_1.1.0.md` — closed inventory of what ships in 1.1.0: new columns, output
-  layout, known bugs, acceptance criterion.
-- `CHANGELOG.md` — release history.
+  before touching extraction logic. It is the only document kept current by design.
+- `CHANGELOG.md` — release history, plus `[Sin publicar]` for v18–v23.
+- `docs/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped. Historical: parts of it were
+  superseded by later versions and are annotated in place.
+- `docs/brief_*.md` — three closed work orders, kept for the evidence behind each change.
+- `docs/contradicciones.md` — the documentation audit run before 1.1.0, with its resolutions.
 
 ## License
 

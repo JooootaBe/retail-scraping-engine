@@ -1,5 +1,14 @@
 # Contradicciones en la documentación — auditoría previa a 1.1.0
 
+> **CERRADA — los 10 puntos se resolvieron y 1.1.0 shipeó.** (nota agregada 2026-08-26)
+>
+> El veredicto "NO LISTO PARA 1.1.0" es del 2026-08-20 contra el árbol en `83c9ca4`, no del
+> estado actual: hoy 1.1.0 y 1.2.0 están publicados y el motor va por v23. Ver `## Resoluciones`
+> al final, que es la parte de este documento que sigue siendo operativa — `CLAUDE.md` remite acá
+> antes de re-agregar algo que se decidió sacar. Los hechos base de la tabla de abajo (56
+> columnas, `SCHEMA_VERSION 3`, `SALIDA` dentro del paquete) son de esa fecha: hoy son 79
+> columnas, esquema 6 y la salida se deriva de la raíz del repo.
+
 Verificación hecha el 2026-08-20 contra el árbol en `83c9ca4`. Cada fila cita archivo y línea.
 Nada acá viene de memoria: lo que no se pudo contrastar contra un archivo está en
 **Indeterminadas**.

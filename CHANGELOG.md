@@ -46,6 +46,18 @@ Seis versiones del motor desde 1.2.0 — v18 a v23 — y dos de ellas mueven `SC
   `test_estado_por_corrida.py` (los globales por-corrida, cuyo reinicio vivía inalcanzable dentro de
   `main()` hasta v23)
 
+- **`ops/`, una frontera nueva en el árbol.** Herramientas operativas que corren a mano o por cron,
+  nunca modifican el motor y nunca son importadas por él, y responden una pregunta *sobre* el
+  catálogo o sobre una sucursal en lugar de extraer precios. Viven en su propia carpeta
+  justamente para que ese límite se vea. Dos hasta ahora:
+  - `ops/arbol_categorias.py` (`1b80d3b`) saca un snapshot del árbol de categorías y lo diffea
+    contra el anterior. Una categoría nueva no es ruido técnico, es señal comercial —alguien del
+    otro lado decidió empezar a vender algo— y hasta ahora entraba al recorrido en silencio
+  - `ops/obtener_nodo_logistico_mk.py` (`1cefa70`) captura la firma logística real de una sucursal
+    desde un checkout vivo, con navegador headed. Es la evidencia que hace falta ANTES de confiar
+    en una entrada nueva de `NODOS`: una firma mal cargada no da error, simplemente hace que VTEX
+    nunca la devuelva y que la sucursal parezca cubierta aportando cero precios verificados
+
 ### Changed
 - **`precio_mayorista = list_price − descuento`**, no `price − descuento` (v18).
   `SCHEMA_VERSION` 4 → 5 **sin agregar una sola columna**: la columna cambia de significado y la

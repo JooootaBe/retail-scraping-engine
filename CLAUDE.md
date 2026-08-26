@@ -134,6 +134,12 @@ For a change that touches extraction rules, the sharper test is the acceptance c
 the fixture, applying that section's three exclusion groups. It closed at 40/40 on 2026-08-21. A pure
 function can be tested without the network at all — that is why the rules live in pure functions.
 
+**Expect 38/40 today, not 40/40, and that is correct.** The golden was produced by probe v5 under the
+pre-v18 formula, so its wholesale columns are stale exactly where `price != list_price` — measured, 2 of
+the 40 rows. §10 now names those two rows and adds them as a fourth exclusion group; read it there rather
+than re-deriving which they are. A diff outside them is a real regression. The golden is **not**
+regenerated: a baseline rewritten every time the rules change stops being a baseline.
+
 ## Versioning convention — read before editing
 
 **Never edit the engine in place under the same identity, and never let two versions produce output under
@@ -426,8 +432,12 @@ Don't hand-edit a header to make a mismatch go away.
 
 1.1.0's reason for existing is the bi-precio: Makro discounts a SKU past a declared threshold
 (`CantidadBiPrecioMK`), and that is the number a pricing analyst actually negotiates against. The mechanism,
-the formula and the 22 columns are specified in `docs/decisiones_1.1.0.md` §1 and §5 — read there, don't
-restate them here.
+the mechanism and the 22 columns are specified in `docs/decisiones_1.1.0.md` §1 and §5 — read there, don't
+restate them here. **One exception, and it is the formula itself:** §1 and §5 still carry the pre-v18
+`precio_mayorista = price − descuento`, which v18 measured wrong (11/23 against the storefront cards). The
+current formula is `list_price − descuento` and it lives in `calcular_mayorista`, with the correction
+recorded in `docs/brief_correccion_mayorista.md` and the `[Sin publicar]` section of `CHANGELOG.md`. §1 is
+right about everything else — the threshold's source, the single step, the teaser, the detector.
 
 What belongs here is the epistemics, because it is easy to get wrong twice:
 
@@ -572,21 +582,21 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   `docs/brief_tres_correcciones.md` are **all three closed**, despite reading as open work orders. Each
   shipped: the wholesale base in v18 (`a84a3e5`), TAREA B's discovery raw in v19 (`10c0983`) and TAREA A's
   stockout price in v20, and the truncation / audit / `surtido_makro` trio in `8569056`, `03e2189` and
-  `a2b6775`. They stay because they record what evidence forced each change. Read as pending, they would
-  cause finished work to be redone.
+  `a2b6775`. They stay because they record what evidence forced each change, and each now opens with a
+  blockquote saying so. Read as pending, they would cause finished work to be redone. One real open item
+  survives them: `surtido_makro` was measured redundant and deliberately **not** deleted — revisit at 30
+  days, or when scope leaves abarrotes.
 - `CLAUDE.md` is **tracked by git**: every edit lands in the history and in a PR diff. Treat it as source,
   not as scratch. `.gitignore` covers `.env`, `data/`, `graphify-out/`, `.vscode/` and build artifacts.
 - `graphify-out/` holds a generated knowledge graph of this repo (`graph.html`, `GRAPH_REPORT.md`) — useful
   for orientation, but the engine file itself is always the source of truth.
-- `docs/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped: verified bi-price mechanism, the 22
+- `docs/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped: the bi-price mechanism, the 22
   columns, known bugs, acceptance criterion and scope. It owns those numbers and definitions; don't restate
-  them here, where the two copies would drift apart. Consult it before proposing changes. Its §9 bug table
-  is **not** fully cleared: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
-  `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open. Its §12 lists
-  `--categorias` as out of scope — that was true for 1.1.0 and stopped being true in 1.2.0, which shipped
-  it as `--categoria`. Its §2 calls `sellerChain` "the only proof of Makro assortment" — measured false on
-  2026-08-25 (see "`surtido_makro` does not answer the assortment question"); the §2 finding it rests on
-  (the catalog endpoint has no branch context) still holds, the column's claim does not. The document is an
-  inventory of *that* release; don't read it as the current roadmap.
+  them here, where the two copies would drift apart. Consult it before proposing changes — but read it as
+  the record of *that* release, not as the current roadmap. **Its superseded parts are annotated in place**
+  (a blockquote at each one): the wholesale formula in §1 and §5, the assortment claim in §2, the 78-column
+  count and the `biprecio_status` enum in §5, and `--categorias` in §12. Its §9 bug table is **not** fully
+  cleared either: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
+  `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open.
 - `docs/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
   it before re-adding anything this file used to say.

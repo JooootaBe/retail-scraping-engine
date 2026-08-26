@@ -1,5 +1,14 @@
 # Brief — corrección de la fórmula del precio mayorista
 
+> **CERRADO — shipeó en v18, commit `a84a3e5`.** (nota agregada 2026-08-26)
+>
+> Se lee como orden de trabajo abierta y no lo es. `precio_mayorista` se calcula desde
+> `list_price` desde v18, `SCHEMA_VERSION` pasó de 4 a 5 sin agregar una columna, y las 23 fichas
+> del storefront quedaron fijadas como regresión en
+> `tests/makro_plazavea/test_precio_mayorista.py` (23/23). Se conserva porque registra la
+> evidencia que forzó el cambio y por qué la fórmula vieja pudo estar mal seis semanas sin que
+> nada la delatara. **No hay nada que ejecutar acá.**
+
 Para pasar a Claude Code. Contexto: `retail_scraping_engine`, colector `makro_plazavea`.
 
 ---
