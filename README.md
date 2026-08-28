@@ -72,6 +72,8 @@ data/                                            generated output (gitignored)
 - `CLAUDE.md` — guiding principles, architecture, and how to run and verify a change. Read it
   before touching extraction logic. It is the only document kept current by design.
 - `CHANGELOG.md` — release history, plus `[Sin publicar]` for v18–v23.
+- `docs/columnas.md` — the column dictionary: what each of the 79 `filas.csv` columns says, why it
+  exists, what its empty cell means, and which ones changed meaning between schema versions.
 - `docs/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped. Historical: parts of it were
   superseded by later versions and are annotated in place.
 - `docs/brief_*.md` — three closed work orders, kept for the evidence behind each change.

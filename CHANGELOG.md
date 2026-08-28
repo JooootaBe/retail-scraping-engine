@@ -123,6 +123,30 @@ Seis versiones del motor desde 1.2.0 — v18 a v23 — y dos de ellas mueven `SC
 - `-p no:cacheprovider`: pytest ya no deja un `.pytest_cache` en la raíz del repo
 
 ### Documentación
+- **`docs/columnas.md`, nuevo: el diccionario de las 79 columnas de `Fila`.** Una entrada por
+  columna con qué responde, por qué existe, todos los valores que el código puede producir (no solo
+  los observados), qué significa su vacío y dónde se asigna. Salió de leer el motor y de perfilar
+  `run_20260826_021034` (3.162 filas, `SCHEMA_VERSION 6`). Es autoritativo **solo** sobre semántica
+  de columnas: la mecánica del bi-precio la sigue poseyendo `docs/decisiones_1.1.0.md` §1/§5 y las
+  razones de diseño `CLAUDE.md`. Lo que no existía en ninguna parte:
+  - **Qué columnas cambiaron de SIGNIFICADO sin cambiar de nombre**, marcadas con ⚠. Nueve:
+    `precio_mayorista` y sus tres derivadas (base `price` → `list_price`, v18), `discount_pct` (el
+    `0.00` de una fila sin stock pasó a vacío, v20), `chain_stock` (foto de `panel.json` → dato
+    refrescado, v08), `stock_signal` (`QUIEBRE_*` → `SIN_STOCK_*`, v20), `bi_umbral` (dejó de
+    vaciarse en todo estado ≠ `COMPLETO`, v18) y `precio_mayorista_verificado`
+  - **Los tres significados del vacío de `precio_mayorista_verificado`**, incluido el que no se
+    puede ver desde el CSV: SKU 10020888 de esta corrida se midió a `qty=2`, coincidió, y lo
+    verificado fue una **ausencia** de escalón — el vacío se conservó a propósito (`:5589-5590`) y
+    es indistinguible de "no había nada que verificar". Y que un `SI` **no** distingue auditado de
+    propagado: 2 de las 4 filas con `SI` nunca tocaron la red. Esa distinción solo vive en `run.json`
+  - **14 invariantes que un lector asumiría y que no se cumplen**, todos medidos: `precio_mayorista`
+    lleno con `descuento_mayorista_pct` vacío (75 filas), `bi_umbral` lleno sin precio mayorista
+    (396), `descuento_monto` sin precio mayorista (130), y la resta que **no cierra a propósito** en
+    una fila `DQ_MAYORISTA_DISCREPA`
+  - **Dos columnas sin propósito determinable desde el código**: `sku_ref`, que nadie lee y que
+    ningún documento menciona, y `base_price`, cuya tasa de llenado era pregunta abierta de §11 —
+    esta corrida la contesta: 100% llena e **idéntica a `list_price` en las 3.162 filas**. No se
+    borra ninguna: misma cautela que con `surtido_makro`, un solo alcance es evidencia fina
 - **`CLAUDE.md` se sincroniza contra el código, no contra sí mismo.** Se declaraba "el único
   documento mantenido al día por diseño" mientras `README.md` estaba más actualizado que él.
   Verificado contra la fuente: 7085 líneas de colector, `VERSION 2026.08.25-23`,
