@@ -49,9 +49,15 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
   trabajo lo hace esta columna. Es lo único que le dice a una capa de consolidación qué corridas
   puede unir con `UNION` (`CLAUDE.md`, "un cambio de esquema no debe corromper la historia").
 - **Valores posibles** — `"3"` (v13/v14), `"4"` (v15, 78 columnas), `"5"` (v18, mismas 78 columnas
-  con `precio_mayorista` redefinido), `"6"` (v20 en adelante, 79 columnas). Hoy siempre `6`.
+  con `precio_mayorista` redefinido), `"6"` (v20 a v23, 79 columnas), `"7"` (v24 en adelante,
+  mismas 79 columnas con `descuento_monto` / `precio_mayorista` **descontaminados**). Hoy siempre
+  `7`. El bump de v24 es el tercer motivo distinto por el que esta columna se movió: v15 cambió la
+  **forma**, v18 y v20 el **significado**, y v24 el **valor** — la cabecera y la definición quedan
+  idénticas, pero hasta v23 esas dos columnas podían traer el descuento de un teaser condicionado
+  a tarjeta en vez del bi-precio. Dos poblaciones bajo el mismo nombre, y sin este bump nada las
+  separa.
 - **Vacía** — nunca: tiene default de clase.
-- **Ejemplo** — `6`.
+- **Ejemplo** — `7`.
 - **Dónde vive** — `makro_plazavea.py:198` (constante), `:941` (default del campo).
 
 ### timestamp
@@ -787,6 +793,19 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 - **Por qué existe** — **es un hecho de VTEX y se publica aunque el mayorista no se pueda armar**;
   es lo que hace diagnosticable un `SIN_UMBRAL` (§6.4). Se lee primero de la medición (viene con
   contexto de sucursal y está vivo) y solo si no vino, del catálogo.
+- **De qué teaser se lee (v24)** — del teaser **no condicionado a tarjeta**. Una respuesta puede
+  traer hasta tres teasers, y los condicionados a tarjeta (`PaymentMethodId` en
+  `PAYMENT_METHOD_IDS_TARJETA` = `{"208,202,210", "203,502,501,210"}`, los regímenes
+  `Promo Oh-Pay MAKRO` y `TARJETA OH - MAKRO`) **se excluyen**: su descuento se anuncia y no se
+  cobra sin la tarjeta. Está medido, no supuesto — en `run_20260827_021218` línea 3447 (SKU
+  10012708, `qty=2`, tres teasers, sin tarjeta seleccionada) VTEX aplicó solo el de
+  `PaymentMethodId = "4"`, y los de tarjeta no se aplicaron en ninguna de sus 17 apariciones. La
+  comparación es por **igualdad exacta de la cadena entera**, nunca por substring: `"208"` suelto
+  aparece 13.000+ veces por corrida en `paymentData.paymentSystems`, que es el catálogo de medios
+  de pago del storefront y no una promoción. Hasta v23 se tomaba el **primero del array** y VTEX
+  pone los de tarjeta primero, así que su descuento pisaba al del bi-precio: 6 filas por corrida en
+  las dos corridas en disco. **El descuento de tarjeta no tiene columna propia todavía** — hoy
+  simplemente no entra acá; su columna dedicada es un paso posterior.
 - **Valores posibles** — número plano con dos decimales.
 - **Vacía y qué significa** — ni la medición ni el catálogo trajeron un teaser con descuento. 876
   filas, exactamente el estado `SIN_BIPRECIO` (602) más el resto sin descuento (274 `SIN_DESCUENTO`).
@@ -820,7 +839,16 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
   |---|---|---|---|---|
   | 10012695 | Galleta Animalitos SAN JORGE 1 kg | 3 | 7.50 − 0.30 = **7.20** | **7.20** ✓ |
   | 597 | Aceite de Soya SOYA 900 ml | 20 | 5.70 − 0.10 = **5.60** | **5.60** ✓ |
-  | 10012708 | Chocolate BESOS DE MOZA caja 20un | 2 | 20.50 − 1.50 = 19.00 | **19.90** ✗ |
+  | 10012708 | Chocolate BESOS DE MOZA caja 20un | 2 | 20.50 − 1.20 = 19.30 | **19.90** ✗ |
+
+  La fila de Besos **cambió con v24 y sigue sin cerrar**, y las dos mitades de eso importan por
+  separado. El `1.50` que decía esta tabla era el descuento del teaser de tarjeta, leído por el bug
+  de posición; el del bi-precio es `1.20`, así que la reconstrucción pasa de 19.00 a 19.30 y la
+  discrepancia contra el cobro real baja de 90 a 60 céntimos. Pero **no desaparece**: VTEX declara
+  `1.20` en el teaser y cobra `0.60` por unidad a `qty=2`. Eso es una contradicción de VTEX consigo
+  mismo, independiente del bug de posición, y es exactamente lo que `DQ_MAYORISTA_DISCREPA` existe
+  para registrar — la bandera nombra una contradicción, no un culpable. Sigue abierta, con `n=1`:
+  los otros dos umbrales auditados cierran exacto.
 
 - **⚠ Cambio de significado (v18, `SCHEMA_VERSION` 4 → 5, cabecera idéntica byte a byte)** — lo que
   v18 corrigió fue la **base de la resta**: `price − descuento` pasó a `list_price − descuento`, y
@@ -833,25 +861,34 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
   caso testigo del proyecto: una serie que mezcle filas anteriores y posteriores a v18 promedia dos
   definiciones distintas de la misma columna, y el CSV no se ve diferente.** `schema_version` es lo
   único que las separa.
-- **La tercera fila de la tabla no refuta la fórmula: falla la *fuente* del descuento** (en
-  investigación, **un solo caso observado**, SKU 10012708 en `run_20260827_021218`, propagado a los
-  dos nodos). Ese SKU tiene encima un **profiler de medio de pago** activo —régimen
-  `Promo Oh-Pay MAKRO`, `teaserType: "Profiler"` en el raw, el mismo `promo_regime_id`
-  `439099e5-…` que aparece en la entrada de `promo_regime_name`— y VTEX reporta el descuento del
-  profiler (1.50) **en el mismo campo** `PromotionalPriceTableItemsDiscount` del que sale el
-  escalón. `leer_descuento` devuelve el primer teaser que carga ese parámetro, sin mirar de qué
-  régimen viene: el motor lee **el campo correcto con el valor del régimen equivocado**. La resta da
-  19.00 y la simulación a qty=2 cobra 19.90. Mejora futura posible —**no implementada, y no hay que
-  implementarla con un caso**— descartar los descuentos cuyo teaser sea `teaserType: "Profiler"`.
+- **La tercera fila de la tabla no refutaba la fórmula: fallaba la *fuente* del descuento —
+  ARREGLADO en v24.** El diagnóstico era correcto: VTEX reporta el descuento del teaser de tarjeta
+  (`Promo Oh-Pay MAKRO`, 1.50) **en el mismo campo** `PromotionalPriceTableItemsDiscount` del que
+  sale el escalón, y `leer_descuento` devolvía el primer teaser que cargara ese parámetro sin mirar
+  de qué régimen venía — el campo correcto con el valor del régimen equivocado. No era un caso
+  único: son 6 filas por corrida en las dos corridas en disco, 3 SKUs × 2 nodos cada vez, con
+  conjuntos de SKUs **disjuntos** entre el 26 y el 27 porque la promoción de tarjeta rota a diario.
+- **El criterio que este documento proponía habría sido el equivocado**, y vale dejarlo escrito.
+  Descartar por `teaserType: "Profiler"` habría vaciado el bi-precio en **todo** el dataset: los
+  cuatro regímenes de precio son `Profiler`, incluido `MAKRO-Bi-Precio|Vigente Oculto`, que es el
+  que hay que conservar. El discriminante que sí separa es `PaymentMethodId` por igualdad exacta
+  (ver `descuento_monto`), y lo que lo respalda es que VTEX **aplica** el teaser no condicionado a
+  tarjeta y nunca los de tarjeta.
+- **Y el ticket de tienda le da la razón al fix.** El carrito web real cobró **19.30** por unidad a
+  qty=2 — exactamente lo que el motor reconstruye desde v24, y no los 19.00 de antes ni los 19.90
+  que devuelve la simulación. La verdad externa coincide con la fórmula alimentada con el descuento
+  correcto; lo que queda descolgado es la simulación a `qty=umbral`, que es otra pregunta.
 - **Y la auditoría hizo exactamente lo que tiene que hacer.** `DQ_MAYORISTA_DISCREPA` no es un bug
   del motor: es la alarma que detectó la única fila donde el cálculo no reproduce lo medido, 1 de
   3.164. Al dispararse, el precio **medido** gana (es lo que el cliente paga), `descuento_monto`
   queda intacto —borrar cualquiera de los dos lados borraría el hallazgo— y `precio_mayorista` pasa
   a valer 19.90. Como dice `CLAUDE.md`, la bandera nombra una contradicción, no un culpable.
-- **Observación abierta, y el motor no la resuelve hoy** — contra ticket de tienda, el carrito web
-  real cobró **19.30** por unidad a qty=2 (S/57.90 por 3 unidades), no 19.90. O sea que en este SKU
-  ni siquiera la simulación de VTEX coincide con el carrito. Queda anotado como pregunta abierta del
-  mismo caso, no como algo a corregir en la fórmula.
+- **Observación abierta, y el motor no la resuelve hoy** — el carrito web real cobró 19.30 por
+  unidad a qty=2 (S/57.90 por 3 unidades) y la **simulación** cobra 19.90. En este SKU ni siquiera
+  las dos fuentes de VTEX coinciden entre sí, y por eso `DQ_MAYORISTA_DISCREPA` sigue disparando
+  después de v24 — la discrepancia baja de 90 a 60 céntimos pero no cierra. Con el fix, el lado que
+  queda descolgado es la simulación, no la reconstrucción. Pregunta abierta del mismo caso, `n=1`,
+  no algo a corregir en la fórmula.
 - **Valores posibles** — número plano con dos decimales.
 - **Vacía y qué significa** — solo hay precio en dos estados (`COMPLETO` y
   `BIPRECIO_PUBLICACION_INDETERMINADA`). El vacío tiene una causa distinta por estado, y
@@ -969,6 +1006,11 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 - **Por qué existe** — es lo que permite agrupar SKUs bajo la misma campaña y detectar cuándo una
   campaña cambia. **No se lee de `rateAndBenefitsIdentifiers`**: ese array viene vacío a qty=1 y el
   motor mide a qty=1 siempre, así que como fuente principal es inutilizable (§1). Se lee del teaser.
+- **De qué teaser (v24)** — del mismo que `descuento_monto`: el **no condicionado a tarjeta**, con
+  los de `PAYMENT_METHOD_IDS_TARJETA` excluidos. Las tres columnas de esta sección describen el
+  régimen que produjo el descuento de al lado, así que tienen que mirar el mismo teaser o la fila
+  se contradice sola. Hasta v23 podían nombrar `Promo Oh-Pay MAKRO` junto a un descuento que
+  también salía de ahí; desde v24 nombran el bi-precio, que es el que se cobra.
 - **Valores posibles** — UUID. Acá tres: `225a92ff-…` (2.205, el bi-precio), `57827689-…` (227,
   precio regular) y `439099e5-…` (6, Oh-Pay).
 - **Vacía y qué significa** — no hubo teaser con id ni en la medición ni en el catálogo. 724 filas.
@@ -990,9 +1032,17 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 
 ### payment_method_id
 - **Qué responde** — con qué medio de pago está condicionada la promoción, si lo está.
-- **Por qué existe** — **se registra, no se interpreta.** El comentario del dataclass lo dice: el
-  `4` es informativo y no restringe nada. Existe para que el día que aparezca un descuento atado a
-  una tarjeta específica, el dato ya esté en la serie.
+- **Por qué existe** — se registraba sin interpretarse, y **desde v24 sí se interpreta**: es el
+  discriminante que separa el teaser del bi-precio del teaser de tarjeta (ver `descuento_monto`).
+  Lo que se compara es la cadena entera contra `PAYMENT_METHOD_IDS_TARJETA`, por igualdad exacta.
+  Que el dato ya estuviera en la serie desde 1.1.0 —registrado antes de tener uso— es lo que
+  permitió medir el bug sobre el crudo archivado en vez de tener que volver a scrapear.
+- **Ojo: no está resuelto a qué apunta cada número.** `paymentData.paymentSystems` mapea
+  `208 → Agora-Visa`, `210 → Tarjeta-Oh-Cuotas`, y **no contiene** el `4` ni el `202`/`203`/`501`/
+  `502`. No se sabe si `PaymentMethodId` y `paymentSystem.stringId` son el mismo espacio de ids;
+  el endpoint público que lo diría responde 404. Por eso el motor usa estos valores como
+  **literales opacos** y no interpreta ninguno: para separar los regímenes observados no hace falta
+  saber qué significan, y para afirmar "esto es Tarjeta Oh!" sí haría falta.
 - **Valores posibles** — el o los ids del teaser, como texto. Acá `4` (2.280) y `208,202,210` (6).
 - **Vacía y qué significa** — no hubo teaser con parámetro de pago. 876 filas — exactamente las
   mismas en las que `descuento_monto` está vacío: los dos salen del mismo teaser.

@@ -7,8 +7,45 @@ y el versionado sigue [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
-Seis versiones del motor desde 1.2.0 — v18 a v23 — y dos de ellas mueven `SCHEMA_VERSION`
-(4 → 5 → 6). Nada de esto está publicado todavía.
+Siete versiones del motor desde 1.2.0 — v18 a v24 — y tres de ellas mueven `SCHEMA_VERSION`
+(4 → 5 → 6 → 7). Nada de esto está publicado todavía.
+
+### Fixed
+- **El descuento del bi-precio se elegía por posición en el array de teasers** (v24,
+  `SCHEMA_VERSION` 6 → 7, cabecera idéntica). `leer_descuento` recorría la respuesta entera y
+  devolvía el primer `PromotionalPriceTableItemsDiscount` que encontrara, sin saber de qué teaser
+  salía; `leer_regimen` tomaba el primer teaser con descuento. Cuando un SKU trae además del
+  bi-precio un teaser condicionado a tarjeta (`Promo Oh-Pay MAKRO` / `TARJETA OH - MAKRO`), VTEX lo
+  pone **primero**, así que su descuento entraba en `descuento_monto` y viajaba a
+  `precio_mayorista`, pisando el del bi-precio. Caso testigo: SKU 11776631, mismo nodo, dos días
+  seguidos — el 26 (solo bi-precio 0.90) salió `precio_mayorista` 29.10; el 27 (tarjeta 6.00 +
+  bi-precio 0.90) salió 24.00. S/ 5,10 de salto sin que el escalón cambiara.
+
+  El arreglo filtra por `PaymentMethodId` contra la constante `PAYMENT_METHOD_IDS_TARJETA`
+  (`{"208,202,210", "203,502,501,210"}`), por **igualdad exacta de la cadena entera** — un
+  substring sobre `"208"` daría miles de falsos positivos, porque ese valor aparece 13.000+ veces
+  por corrida en `paymentData.paymentSystems`, el catálogo de medios de pago del storefront. Que el
+  teaser no condicionado a tarjeta es el que manda está **medido**: en `run_20260827_021218` línea
+  3447 (SKU 10012708, `qty=2`, tres teasers, sin tarjeta seleccionada) VTEX aplicó solo el de
+  `PaymentMethodId = "4"`, y los de tarjeta no se aplicaron en ninguna de sus 17 apariciones ni
+  figuran nunca en `rateAndBenefitsIdentifiers`.
+
+  **La fórmula `list_price − descuento` no cambia** — sigue siendo la de v18 y sigue dando 23/23
+  contra las fichas del storefront. Cambia qué descuento entra a ella. Impacto medido reprocesando
+  el crudo: 6 filas por corrida cambian `descuento_monto` (3 SKUs × 2 nodos, ni una más), 2 cambian
+  `precio_mayorista` y 6 y 4 cambian `biprecio_status` — dos de ellas afirmaban `COMPLETO` con un
+  escalón publicado que no existía. Las ~3.156 filas restantes de cada corrida quedan idénticas.
+
+  El `SCHEMA_VERSION` sube por un motivo distinto de los anteriores: no cambia la forma (v15) ni la
+  definición (v18/v20) sino el **valor**. Una columna incorrecta en una época y correcta en la
+  siguiente tiene dos poblaciones bajo el mismo nombre, y como la cabecera no cambió, esta columna
+  es la única señal que una capa de consolidación puede usar para separarlas.
+
+  Esto **no** agrega la columna del descuento de tarjeta: hoy ese descuento simplemente no entra a
+  estas columnas. Su columna dedicada es un paso posterior. No se pierde nada que antes se guardara
+  bien — lo que se perdía era el bi-precio. Cubierto por
+  `tests/makro_plazavea/test_teaser_de_tarjeta.py` (14 casos, payloads verbatim del crudo; con el
+  bug repuesto falla 6 de 14)
 
 ### Added
 - **`price_origin`** (v20): `MEDIDO` (hubo stock, la simulación evaluó promociones) /
