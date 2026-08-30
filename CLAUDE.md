@@ -27,19 +27,23 @@ rules — under pytest or standalone, none of them touching the network — so t
 change and never the last one.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.25-23, SCHEMA_VERSION 6, 79 columns)
+src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.28-24, SCHEMA_VERSION 7, 79 columns)
 pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
-docs/decisiones_1.1.0.md                         closed inventory of what 1.1.0 shipped
-docs/brief_*.md                                  three closed work orders — history, not a roadmap
 CHANGELOG.md                                     released and unreleased changes
-tests/probes/makro_plazavea/                     five exploratory probes (v1…v5) — scripts, not a test suite
-tests/makro_plazavea/                            the regression suite — permanent, unlike probes/
+docs/columnas.md                                 the column dictionary — what each of the 79 columns says
+docs/historia/decisiones_1.1.0.md                closed inventory of what 1.1.0 shipped — archived, still cited
+docs/historia/brief_*.md                         three closed work orders — history, not a roadmap
+docs/historia/contradicciones.md                 the pre-1.1.0 documentation audit and its resolutions
+docs/bodegueros/                                 the new direction (Los Bodegueros) — its own space
+tests/makro_plazavea/                            the regression suite — permanent, six files, all live
 tests/makro_plazavea/test_precio_mayorista.py    23 storefront cards — the only EXTERNAL truth in the repo
 tests/makro_plazavea/test_precio_en_quiebre.py   the six branches of price_origin, rows built by hand
-tests/makro_plazavea/test_propiedades_corrida.py invariants over a real run, replayed from raw.jsonl.gz
+tests/makro_plazavea/test_teaser_de_tarjeta.py   the card teaser: régimen and descuento, payloads verbatim
 tests/makro_plazavea/test_truncamiento.py        the four cases of the pagination ceiling
 tests/makro_plazavea/test_auditoria_mayorista.py the wholesale audit: expectation, propagation, strata
 tests/makro_plazavea/test_estado_por_corrida.py  run-scoped globals survive their own reset
+tests/historia/sondas_makro_plazavea/            five exploratory probes (v1…v5) — archived, they do not run
+tests/historia/regresion_makro_plazavea/         test_propiedades_corrida.py — archived, its run is gone
 tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
 tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv   the 23 hand-captured cards test_precio_mayorista.py reads
 ops/                                             operational tools — NOT the engine; they never measure prices
@@ -109,7 +113,7 @@ sense when the series was one mutable file being appended to. With one immutable
 no accumulated file to reset, and the only thing the flag could still delete is closed history. A flag
 whose only possible effect is destroying the past does not get redefined — it gets removed.
 
-**The regression suite is the first step in verifying any change.** 59 `test_` functions across six
+**The regression suite is the first step in verifying any change.** 64 `test_` functions across six
 files under `tests/makro_plazavea/`, none of which touches the network:
 
 ```bash
@@ -118,22 +122,32 @@ python3 tests/makro_plazavea/test_precio_mayorista.py   # each file also runs st
 ```
 
 No lint or build tooling is wired up, and **pytest is not a declared dependency** — install it, or run
-each file on its own. `probes/` is for exploratory probes and `tests/makro_plazavea/` for permanent
-regression; the two are not interchangeable — a probe may be edited or thrown away, a regression file is
-a promise — and each regression file resolves the repo root as `parents[2]` from its own path. The six
-files:
+each file on its own. Exploratory probes are not regression and the two are not interchangeable — a probe
+may be edited or thrown away, a regression file is a promise. The five probes that found the bi-price now
+live archived under `tests/historia/sondas_makro_plazavea/` and **do not run**; if the new direction needs
+exploratory scripts, they get a fresh folder rather than being mixed back in here.
+
+**Each regression file resolves the repo root as `parents[2]` from its own path, so the depth
+`tests/<colector>/<archivo>.py` is load-bearing, not cosmetic.** Moved one level deeper the whole suite
+dies with `ModuleNotFoundError: No module named 'retail_engine'` — silently, if whatever runs them
+swallows the exit code. It has happened twice: once before 1.1.0 (`CHANGELOG.md`, `[1.1.0]`) and once on
+2026-08-30. Do not relocate these files without editing `parents[2]` in each one.
+
+The six files:
 `test_precio_mayorista.py` (23 storefront cards, read from
 `tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv`), `test_precio_en_quiebre.py` (the six
-`price_origin` branches, hand-built rows), `test_propiedades_corrida.py` (invariants over a real run,
-replayed from `raw.jsonl.gz`; skips itself when `data/` is empty), `test_truncamiento.py` (the pagination
+`price_origin` branches, hand-built rows), `test_teaser_de_tarjeta.py` (the card teaser's régimen and
+descuento, payloads verbatim from the raw), `test_truncamiento.py` (the pagination
 ceiling) and `test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata) and
 `test_estado_por_corrida.py` (the run-scoped globals, whose reset lived unreachable inside `main()`
 until v23). Each also
 prints a report and exits 0/1 when run standalone.
 
-**59 is the count of `test_` functions, which is what pytest reports.** Running the six files standalone
-prints 81 instead, because `test_precio_mayorista.py` is a *single* function asserting over its 23 cards.
-Both numbers are right and they measure different things — don't "correct" one against the other.
+**64 is the count of `test_` functions, which is what pytest reports.** Running the six files standalone
+prints 86 instead, because `test_precio_mayorista.py` is a *single* function asserting over its 23 cards.
+Both numbers are right and they measure different things — don't "correct" one against the other. Both
+were measured on 2026-08-30, after `test_propiedades_corrida.py` was archived; the earlier pair (73 / 95
+over seven files) counted it, and 9 of those 73 were asserting nothing because its run had been deleted.
 
 They test the **pure** functions and the wiring around them. That is a real first step and it is not the
 whole of it: nothing there touches the network, so a green suite says the rules are intact, not that the
@@ -145,7 +159,7 @@ were green and its first live run died in the audit loop on a `KeyError`, becaus
 and its initialisation was not.
 
 For a change that touches extraction rules, the sharper test is the acceptance criterion of
-`docs/decisiones_1.1.0.md` §10: re-measure the 20 SKUs of `golden_v5.csv` with `--skus` and diff against
+`docs/historia/decisiones_1.1.0.md` §10: re-measure the 20 SKUs of `golden_v5.csv` with `--skus` and diff against
 the fixture, applying that section's three exclusion groups. It closed at 40/40 on 2026-08-21. A pure
 function can be tested without the network at all — that is why the rules live in pure functions.
 
@@ -177,7 +191,9 @@ The chronology, because the interesting bump is the one that added nothing: v13 
 kept it at `"3"` because no field changed; v15 raised it to `"4"` when the 22 wholesale columns landed
 (56 → 78); **v18 raised it to `"5"` without adding a single column**, because `precio_mayorista` changed
 meaning (`price − descuento` → `list_price − descuento`) and a series holding rows from both eras would
-average two different definitions; v20 raised it to `"6"` with `price_origin` (78 → 79). Today: `"6"`,
+average two different definitions; v20 raised it to `"6"` with `price_origin` (78 → 79); **v24 raised it to `"7"` with the header
+byte-identical again**, because `descuento_monto` / `precio_mayorista` carried a card-teaser discount
+until v23 and carry the bi-price one from v24 on — same column, two populations. Today: `"7"`,
 79 columns. So a change of *meaning* counts as a schema change even when the header is byte-identical —
 that is the case people forget, and v18 is the precedent. Since each run now writes its own file, a
 schema change no longer
@@ -201,7 +217,7 @@ mislabeling data. `polygonName` is excluded from the match (`Nodo.firma_core()`)
 not a lookup keyed by what you sent. That's what makes 2 → 20 branches free: the loop, the measurement
 loop, and the manifest's per-branch tallies all iterate `NODOS`. Since 1.1.0 the output is one long CSV
 keyed `(run_id, node_id, sku_id)`, so a new branch adds *values to a column* rather than a file
-(`docs/decisiones_1.1.0.md` §8) — cheaper still. To add a branch: add one entry (address, coordinates,
+(`docs/historia/decisiones_1.1.0.md` §8) — cheaper still. To add a branch: add one entry (address, coordinates,
 the four logistics identifiers, `seller_chain`, `archivo`). Nothing else changes — but read "Scaling to
 20+ branches" before trusting it.
 
@@ -374,7 +390,7 @@ time axis in front of them, not to a cell.
 ## `surtido_makro` does not answer the assortment question (measured 2026-08-25)
 
 The column claims to be "the ONLY proof of Makro assortment for THIS branch"
-(`docs/decisiones_1.1.0.md` §2). It is not. Measured across both runs on disk, it is **collinear with
+(`docs/historia/decisiones_1.1.0.md` §2). It is not. Measured across both runs on disk, it is **collinear with
 `availability` in every single row**:
 
 | run | `SI` / `available` | `NO` / `withoutStock` | exceptions |
@@ -453,11 +469,11 @@ Don't hand-edit a header to make a mismatch go away.
 
 1.1.0's reason for existing is the bi-precio: Makro discounts a SKU past a declared threshold
 (`CantidadBiPrecioMK`), and that is the number a pricing analyst actually negotiates against. The mechanism,
-the mechanism and the 22 columns are specified in `docs/decisiones_1.1.0.md` §1 and §5 — read there, don't
+the mechanism and the 22 columns are specified in `docs/historia/decisiones_1.1.0.md` §1 and §5 — read there, don't
 restate them here. **One exception, and it is the formula itself:** §1 and §5 still carry the pre-v18
 `precio_mayorista = price − descuento`, which v18 measured wrong (11/23 against the storefront cards). The
 current formula is `list_price − descuento` and it lives in `calcular_mayorista`, with the correction
-recorded in `docs/brief_correccion_mayorista.md` and the `[Sin publicar]` section of `CHANGELOG.md`. §1 is
+recorded in `docs/historia/brief_correccion_mayorista.md` and the `[Sin publicar]` section of `CHANGELOG.md`. §1 is
 right about everything else — the threshold's source, the single step, the teaser, the detector.
 
 What belongs here is the epistemics, because it is easy to get wrong twice:
@@ -486,7 +502,7 @@ What belongs here is the epistemics, because it is easy to get wrong twice:
   it auditable, and until v22 it was the only bi-price assertion nothing verified.
   `BIPRECIO_PUBLICACION_INDETERMINADA` is excluded from the audit for the mirror-image reason: with no stock
   VTEX quotes no quantity at all, so there is nothing to compare and counting it would manufacture
-  agreement out of silence. The states themselves are `docs/decisiones_1.1.0.md` §5's to define (its enum
+  agreement out of silence. The states themselves are `docs/historia/decisiones_1.1.0.md` §5's to define (its enum
   is annotated there as superseded); what belongs here is the rule that produced them — a status that
   predicts a price must be audited, and one that predicts nothing must never be scored as a pass.
 - **The threshold range verified under the *current* formula is narrower than §11 reads.** §11's 12 / 15 /
@@ -569,7 +585,7 @@ What belongs here is the epistemics, because it is easy to get wrong twice:
 More branches, same architecture — most machinery already scales because it iterates `NODOS`:
 
 - **Free**: `identificar_nodo`'s search loop, the measurement loop, one more `node_id` value inside the
-  single long CSV (`docs/decisiones_1.1.0.md` §8), the manifest's per-branch breakdown, and request-cap
+  single long CSV (`docs/historia/decisiones_1.1.0.md` §8), the manifest's per-branch breakdown, and request-cap
   auto-sizing.
 - **Grows linearly, needs planning**: requests per run (SKUs × branches, ~×4 worst case) and wall-clock time
   (requests are strictly sequential at `--intervalo`, by design — "respeto al servidor" in the module
@@ -587,7 +603,7 @@ More branches, same architecture — most machinery already scales because it it
 
 ## Output files
 
-One immutable folder per run, named exactly like the `run_id` (`docs/decisiones_1.1.0.md` §7):
+One immutable folder per run, named exactly like the `run_id` (`docs/historia/decisiones_1.1.0.md` §7):
 
 ```
 data/makro_plazavea/
@@ -629,7 +645,7 @@ zero — or a `NaN` — never stands in for an unknown.
 
 **None of the five is a dead code path.** The address pair and `error` are reachable from the orderForm
 and failure paths; `--auditoria`'s orderForm responses do carry a populated `shippingData.address`, read
-for reconciliation and then discarded, so the value exists and simply isn't the row's. `docs/decisiones_1.1.0.md`
+for reconciliation and then discarded, so the value exists and simply isn't the row's. `docs/historia/decisiones_1.1.0.md`
 §11 already carries the fill rate of `postal_resolved` / `neighborhood_resolved` as a 30-day open question.
 
 **`dq_flags` is not one of them, and it is the trap.** It carries `DQ_MAYORISTA_DISCREPA` in exactly one
@@ -641,11 +657,16 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
 
 ## Notes for future sessions
 
-- **This file and `docs/decisiones_1.1.0.md` are the only authoritative context documents in-repo.**
-  Everything else under `docs/` is closed history, not a roadmap — don't cite section numbers from one as
-  if they were current, and don't act on a brief without checking git first.
-- `docs/brief_correccion_mayorista.md`, `docs/brief_tareas_bloqueantes.md` and
-  `docs/brief_tres_correcciones.md` are **all three closed**, despite reading as open work orders. Each
+- **`docs/` has three floors and the folder name says which.** `docs/columnas.md` sits at the root and is
+  live: it is authoritative on what each cell of `filas.csv` means. `docs/historia/` is the closed record of
+  the 1.1.0 era — still cited, never a roadmap; don't cite section numbers from it as if they were current,
+  and don't act on a brief without checking git first. `docs/bodegueros/` is the new direction and owns
+  nothing about the engine yet.
+- **This file, `docs/columnas.md` and `docs/historia/decisiones_1.1.0.md` are the authoritative context
+  documents in-repo**, each over a different thing: design reasons here, cell meanings in `columnas.md`,
+  the 1.1.0 inventory in `decisiones_1.1.0.md`.
+- `docs/historia/brief_correccion_mayorista.md`, `docs/historia/brief_tareas_bloqueantes.md` and
+  `docs/historia/brief_tres_correcciones.md` are **all three closed**, despite reading as open work orders. Each
   shipped: the wholesale base in v18 (`a84a3e5`), TAREA B's discovery raw in v19 (`10c0983`) and TAREA A's
   stockout price in v20, and the truncation / audit / `surtido_makro` trio in `8569056`, `03e2189` and
   `a2b6775`. They stay because they record what evidence forced each change, and each now opens with a
@@ -655,9 +676,15 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   post-v18 wholesale formula.
 - `CLAUDE.md` is **tracked by git**: every edit lands in the history and in a PR diff. Treat it as source,
   not as scratch. `.gitignore` covers `.env`, `data/`, `graphify-out/`, `.vscode/` and build artifacts.
-- `graphify-out/` holds a generated knowledge graph of this repo (`graph.html`, `GRAPH_REPORT.md`) — useful
-  for orientation, but the engine file itself is always the source of truth.
-- `docs/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped: the bi-price mechanism, the 22
+- `graphify-out/` (gitignored) can hold a generated knowledge graph of this repo — useful for orientation
+  when present, but the engine file itself is always the source of truth. It is absent from the tree today.
+- **`test_propiedades_corrida.py` was archived on 2026-08-30, not repaired.** It was pinned to
+  `run_20260822_020027`, deleted from disk, so it skipped itself and reported green while asserting
+  nothing. Rebuilding that coverage against a surviving run (`run_20260826_021034`, the one
+  `docs/columnas.md` is written against) is a *new* test, with its own reasoning about which invariants
+  still hold on a different scope (`--categoria /431/`) — not a re-point of the archived one. See
+  `tests/historia/regresion_makro_plazavea/LEEME.md`.
+- `docs/historia/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped: the bi-price mechanism, the 22
   columns, known bugs, acceptance criterion and scope. It owns those numbers and definitions; don't restate
   them here, where the two copies would drift apart. Consult it before proposing changes — but read it as
   the record of *that* release, not as the current roadmap. **Its superseded parts are annotated in place**
@@ -665,7 +692,9 @@ cross-branch comparison logic to this engine, at 2 branches or at 20.
   count and the `biprecio_status` enum in §5, and `--categorias` in §12. **§11 is not annotated and should
   be**: its "resuelta en todo el rango observado (2 a 24)" was measured under the pre-v18 formula, so it
   records what was verified then, not what is verified now — see "the wholesale price is reconstructed".
-  Its §9 bug table is **not** fully cleared either: the collector-side bugs are fixed, the probe-side ones (v1/v4 pointing at
-  `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are still open.
-- `docs/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
+  Its §9 bug table is **not** fully cleared either: the collector-side bugs are fixed, and the probe-side
+  ones (v1/v4 pointing at `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are now moot
+  rather than fixed — those five probes were archived to `tests/historia/sondas_makro_plazavea/` on
+  2026-08-30 and no longer run. If one is ever revived, its bug comes back with it.
+- `docs/historia/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
   it before re-adding anything this file used to say.

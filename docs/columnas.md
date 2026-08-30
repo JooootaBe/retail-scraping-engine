@@ -1,6 +1,6 @@
 # Diccionario de columnas — `filas.csv`
 
-> `SCHEMA_VERSION` **6** · **79 columnas** · motor `makro_plazavea.py` **VERSION 2026.08.25-23** (v23)
+> `SCHEMA_VERSION` **7** · **79 columnas** · motor `makro_plazavea.py` **VERSION 2026.08.28-24** (v24)
 >
 > Todos los ejemplos salen de **`run_20260826_021034`**: 3.162 filas (1.581 SKUs × 2 nodos),
 > modo `simulation`, alcance `--categoria /431/` (Abarrotes), 83 categorías recorridas,
@@ -9,7 +9,7 @@
 > salen vacías.
 
 Este documento es autoritativo sobre **una sola cosa: qué significa cada celda**. La mecánica del
-bi-precio vive en `docs/decisiones_1.1.0.md` §1 y §5; las razones de diseño del motor viven en
+bi-precio vive en `docs/historia/decisiones_1.1.0.md` §1 y §5; las razones de diseño del motor viven en
 `CLAUDE.md`; la historia de cada cambio vive en `CHANGELOG.md` y en el bloque `CAMBIOS` del propio
 motor. Acá se cita, no se copia.
 
@@ -105,7 +105,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 - **Qué responde** — el código de la sucursal preguntada.
 - **Por qué existe** — es **la clave que hace que agregar una sucursal no cambie el esquema**. La
   salida es un CSV largo con clave `(run_id, node_id, sku_id)`: la sucursal 21 agrega valores a esta
-  columna, no un archivo ni una columna nueva (`docs/decisiones_1.1.0.md` §8).
+  columna, no un archivo ni una columna nueva (`docs/historia/decisiones_1.1.0.md` §8).
 - **Valores posibles** — las claves de `NODOS`: hoy `359`, `360`.
 - **Vacía** — nunca.
 - **Ejemplo** — `359`.
@@ -138,7 +138,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 - **Qué responde** — el código de referencia interno que Makro le puso al SKU.
 - **Por qué existe** — **no hay razón documentada.** Sale de `items[].referenceId[].Value` en el
   catálogo, se escribe y nada del motor lo lee después. Existe desde v01, ningún `CAMBIOS` lo
-  menciona y `docs/decisiones_1.1.0.md` tampoco. Es plausible que sea el código de góndola o de ERP
+  menciona y `docs/historia/decisiones_1.1.0.md` tampoco. Es plausible que sea el código de góndola o de ERP
   —los valores de esta corrida son todos `2014xxxx`/`2017xxxx`, un rango propio distinto del
   `sku_id`— pero **eso es una hipótesis, no algo que el código diga**. Ver "Columnas cuyo propósito
   no pude determinar".
@@ -190,7 +190,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 
 ### seller_id
 - **Qué responde** — qué vendedor publica la oferta en el catálogo.
-- **Por qué existe** — `docs/decisiones_1.1.0.md` §6.5 lo dejó explícitamente: es campo de origen
+- **Por qué existe** — `docs/historia/decisiones_1.1.0.md` §6.5 lo dejó explícitamente: es campo de origen
   (`items[].sellers[0].sellerId`) y **si aparece un tercero de marketplace va a traer otro valor**.
   Hoy es constante `1` y esa constancia es el hallazgo, no un defecto.
 - **Valores posibles** — el id del primer seller, o `1` por defecto si el catálogo no lo trae.
@@ -256,7 +256,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 - **Qué responde** — el campo `price` crudo del ítem de VTEX, que no es ni el de venta ni el de
   lista sino un tercero del modelo de VTEX.
 - **Por qué existe** — **no hay razón documentada de por qué se guarda.** Se escribe desde v01 y
-  ningún consumidor lo lee. `docs/decisiones_1.1.0.md` §6.6 lo puso en la lista de columnas a
+  ningún consumidor lo lee. `docs/historia/decisiones_1.1.0.md` §6.6 lo puso en la lista de columnas a
   medir 30 días antes de decidir si se borra, y §11 dejó su tasa de llenado como pregunta abierta.
   **Esta corrida contesta la pregunta y el resultado es incómodo**: se llena en el 100% de las
   filas y es **idéntico a `list_price` en las 3.162**, así que no aporta un solo bit. Aplica la
@@ -663,7 +663,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
   `--modo orderform` o en el fallback por SKU a orderForm. Las respuestas de orderForm que trae
   `--auditoria` sí traen la dirección poblada, pero se leen para reconciliar y se descartan: el
   valor existe, no es de esta fila. Su tasa de llenado es pregunta abierta desde
-  `docs/decisiones_1.1.0.md` §11.
+  `docs/historia/decisiones_1.1.0.md` §11.
 - **Ejemplo** — no hay: 3.162 de 3.162 vacías.
 - **Dónde vive** — `makro_plazavea.py:4809`, lectura en `extraer_direccion` (`:4210`).
 
@@ -750,8 +750,8 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 > mayorista, las columnas de precio van vacías y `biprecio_status` explica por qué.
 >
 > El mecanismo (umbral del catálogo + descuento del teaser, un solo escalón) está en
-> `docs/decisiones_1.1.0.md` §1 y §5, con la corrección de la fórmula en
-> `docs/brief_correccion_mayorista.md`. Acá va solo qué dice cada celda.
+> `docs/historia/decisiones_1.1.0.md` §1 y §5, con la corrección de la fórmula en
+> `docs/historia/brief_correccion_mayorista.md`. Acá va solo qué dice cada celda.
 >
 > **Lo que hay que entender antes de leer cualquiera de estas nueve:** el motor mide siempre a
 > `qty = 1`, y a `qty = 1` el descuento del escalón **no se aplica**. Así que el precio mayorista
@@ -900,7 +900,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
   0.30, resta directa. El 0.30 **ya es por unidad**; no se divide entre 3.
 - **Dónde vive** — `makro_plazavea.py:4647`, regla en `calcular_mayorista` (`:3626`), fuente del
   descuento en `leer_descuento` (`:3459`), y `:5594` cuando la auditoría lo sobrescribe con lo
-  medido. La mecánica del bi-precio, en `docs/decisiones_1.1.0.md` §1 y §5 (con su fórmula anotada
+  medido. La mecánica del bi-precio, en `docs/historia/decisiones_1.1.0.md` §1 y §5 (con su fórmula anotada
   como superada); la historia del cambio, en `CHANGELOG.md`.
 
 ### precio_mayorista_cents ⚠
@@ -1108,7 +1108,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 ### surtido_makro
 - **Qué responde** — nominalmente, "¿este SKU es parte del surtido de ESTA sucursal?". **En los
   hechos responde otra cosa** — ver abajo.
-- **Por qué existe** — `docs/decisiones_1.1.0.md` §2 la declaró "la ÚNICA prueba de surtido Makro de
+- **Por qué existe** — `docs/historia/decisiones_1.1.0.md` §2 la declaró "la ÚNICA prueba de surtido Makro de
   esta sucursal". **Medido, no lo es.** La regla es
   `"SI" if f"plazaveamko{node_id}" in seller_chain else "NO"`, y VTEX solo agrega el seller de la
   sucursal cuando resolvió un vendedor que va a despachar — cosa que requiere stock. Así que lo que
@@ -1239,7 +1239,7 @@ Columnas con ⚠ (significado cambiado, no agregado): `discount_pct`, `chain_sto
 Dos, y las dos se escriben sin que nada las lea.
 
 **`sku_ref`** — sale de `items[].referenceId[].Value` (`:1664-1669`), se copia a la fila (`:4740`) y
-ahí termina. No hay entrada de `CAMBIOS` que la introduzca, `docs/decisiones_1.1.0.md` no la
+ahí termina. No hay entrada de `CAMBIOS` que la introduzca, `docs/historia/decisiones_1.1.0.md` no la
 menciona y ningún test la usa. Se llena en las 3.162 filas con valores de un rango propio
 (`20148211`, `20178701`…) distinto del `sku_id`, lo que **sugiere** un código de góndola o de ERP —
 pero eso es inferencia mía sobre los datos, no algo que el código diga. Si sirve para cruzar contra
@@ -1247,7 +1247,7 @@ un sistema interno de Makro, ese es el propósito y hay que anotarlo; si no, es 
 nadie pidió.
 
 **`base_price`** — el campo `price` crudo del ítem de VTEX (`:4763`). Nada lo lee.
-`docs/decisiones_1.1.0.md` §6.6 la puso en la lista de "medir tasa de llenado 30 días antes de
+`docs/historia/decisiones_1.1.0.md` §6.6 la puso en la lista de "medir tasa de llenado 30 días antes de
 decidir si se borra" y §11 dejó esa medición como pregunta abierta. **Esta corrida la contesta y el
 resultado es peor que un vacío**: se llena en el 100% de las filas y es idéntica a `list_price` en
 las 3.162, así que no aporta información alguna. Aplica la misma cautela que con `surtido_makro`:
@@ -1265,7 +1265,7 @@ marketplace va a traer otro valor).
 ## Cierre 2 — Columnas derivables de otras
 
 En cada par, **la canónica es la que el motor usa para calcular** y la otra es conveniencia de
-lectura. `docs/decisiones_1.1.0.md` §6.4 lo fija como regla: ninguna columna derivada reemplaza a
+lectura. `docs/historia/decisiones_1.1.0.md` §6.4 lo fija como regla: ninguna columna derivada reemplaza a
 su origen.
 
 | conveniencia | canónica | relación |
@@ -1331,7 +1331,7 @@ evidencia que no hay que confundir**:
   escalón declarado quedó por debajo de la promoción unitaria que ya corría a qty=1, VTEX cobró
   88.00 (su propio `price`, contra un `list_price` de 118.50) y **el lado equivocado era la
   auditoría**, no VTEX: comparaba contra una expectativa que no aplicaba. Léelo con el mismo criterio
-  que `docs/decisiones_1.1.0.md` §11: es constancia de una verificación pasada, no algo que se pueda
+  que `docs/historia/decisiones_1.1.0.md` §11: es constancia de una verificación pasada, no algo que se pueda
   correr de nuevo. Si mañana alguien duda del número, **no hay contra qué chequearlo**.
 - **El caso nuevo sí se puede reproducir.** SKU 10012708 en `run_20260827_021218`, en los dos nodos:
   `list_price` 20.50 − descuento 1.50 = 19.00, y VTEX cobra 19.90. El `raw.jsonl.gz` de esa corrida
@@ -1403,7 +1403,7 @@ y hay que separar dos fuentes de varianza que se parecen y no son lo mismo.
   diferencia real de precio. Ese ejemplo es **histórico y no verificable hoy**: salió de
   `run_20260822_020027`, de la que no queda ni la carpeta ni una línea en `runs.jsonl` (ver la
   trampa 4). Vale como registro de lo que se midió entonces, con el criterio de
-  `docs/decisiones_1.1.0.md` §11, no como algo que se pueda volver a correr. Lo que **sí** es
+  `docs/historia/decisiones_1.1.0.md` §11, no como algo que se pueda volver a correr. Lo que **sí** es
   verificable es que la propagación de v22 hace su trabajo: el SKU 10012708 de
   `run_20260827_021218` trae 19.90 y `DQ_MAYORISTA_DISCREPA` en los **dos** nodos, no solo en el
   auditado.

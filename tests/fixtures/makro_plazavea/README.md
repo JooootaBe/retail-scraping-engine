@@ -8,14 +8,14 @@ Corrida de la sonda v5, 20260820_000016.
 Auditoría del precio mayorista: 3/3 exactas al centavo.
 
 El criterio de aceptación de 1.1.0 contra este golden —qué columnas deben coincidir exacto y
-cuáles se excluyen por volátiles o por cambio de diseño— lo fija `docs/decisiones_1.1.0.md` §10.
+cuáles se excluyen por volátiles o por cambio de diseño— lo fija `docs/historia/decisiones_1.1.0.md` §10.
 Es la única fuente: no repetirlo acá, dos copias divergen.
 No reemplazar este archivo sin dejar constancia en CHANGELOG.md.
 
 **Es pre-v18: las columnas de mayorista de 2 de las 40 filas están desactualizadas a propósito**,
 porque el golden nació con `precio_mayorista = price − descuento` y desde v18 la base es
 `list_price`. El criterio cierra hoy en 38/40. Cuáles son esas dos filas y por qué el archivo no se
-regenera lo fija la nota de `docs/decisiones_1.1.0.md` §10, que es la misma única fuente de arriba.
+regenera lo fija la nota de `docs/historia/decisiones_1.1.0.md` §10, que es la misma única fuente de arriba.
 
 ## fichas_publicadas_20260822.csv
 

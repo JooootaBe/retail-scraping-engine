@@ -160,6 +160,57 @@ Siete versiones del motor desde 1.2.0 — v18 a v24 — y tres de ellas mueven `
 - `-p no:cacheprovider`: pytest ya no deja un `.pytest_cache` en la raíz del repo
 
 ### Documentación
+- **Reorganización del repositorio al cerrar la etapa "motor sin cliente" (2026-08-30).** Nada se
+  borró: todo movimiento fue con `git mv` y el historial de cada archivo está intacto. El proyecto
+  se reenfoca en **Los Bodegueros** (precios de Makro para bodegas y minimarkets), y el árbol ahora
+  distingue tres cosas que estaban mezcladas: lo **vivo**, lo **archivado** y el **rumbo nuevo**.
+  - `docs/historia/` — los cinco documentos de la etapa 1.1.0 (`decisiones_1.1.0.md`, los tres
+    `brief_*.md`, `contradicciones.md`) salen de la raíz de `docs/`. Estaban cerrados hace tiempo
+    pero convivían con documentación viva, y tres de ellos se leen como órdenes de trabajo abiertas:
+    leídos como pendientes, harían rehacer trabajo ya entregado. Las ~20 citas de ruta en `CLAUDE.md`,
+    `README.md`, `docs/columnas.md` y `tests/fixtures/makro_plazavea/README.md` se actualizaron en el
+    mismo commit; las de este CHANGELOG **no**, porque describen rutas que eran ciertas cuando se
+    escribieron. `decisiones_1.1.0.md` sigue siendo autoritativo sobre la mecánica del bi-precio:
+    archivado no significa superado.
+  - `tests/historia/sondas_makro_plazavea/` — las cinco sondas exploratorias (`buscando_precio_mayorista`
+    v1–v4 y `precio_mayorista_encontradov5.py`) salen de `tests/probes/`, que desaparece. Son etapa
+    vieja: apuntan a archivos que ya no existen (`mk_scraping_engine_0.1.0.py`, `v1.py` — la tabla §9
+    de `decisiones_1.1.0.md`) y no corren. Se conservan porque `golden_v5.csv` salió de la sonda v5 y
+    sin ella el fixture queda sin procedencia.
+  - `tests/historia/regresion_makro_plazavea/` — `test_propiedades_corrida.py` sale de
+    `tests/makro_plazavea/`, que queda con **seis** archivos vivos. Estaba clavado a
+    `run_20260822_020027`, una corrida borrada de `data/` (gitignoreado): no fallaba, se salteaba y
+    salía con código 0, así que **9 de las 73 funciones `test_` que la suite decía tener no
+    afirmaban nada**. Se archiva en vez de re-apuntarlo: hacerlo contra `run_20260826_021034` es
+    otro alcance (`--categoria /431/`) y otra época del motor, o sea un test nuevo con su propio
+    razonamiento, no un cambio de ruta. `tests/historia/conftest.py` declara la carpeta como
+    no-recolectable, porque a esa profundidad su `parents[2]` ya no resuelve la raíz del repo y
+    pytest se interrumpiría al importarlo. La suite queda en **64 pasados sobre seis archivos**
+  - `docs/bodegueros/` — espacio nombrado del rumbo nuevo, con `README.md` que fija el alcance y qué
+    del motor sirve directo al producto. Reemplaza a los bocetos vacíos `nuevo_rumbo_bodegueros/`,
+    `docs/docs_bodegueros/`, `tests/tests_historia/` y `tests/fixtures/makro_pe/`, que git nunca llegó
+    a ver por estar vacíos.
+  - Cada carpeta de archivo lleva un `LEEME.md` que dice qué contiene, por qué no se borra y qué
+    sigue abierto.
+- **Deriva de versión corregida en los tres documentos vivos.** `CLAUDE.md`, `README.md` y
+  `docs/columnas.md` seguían anunciando `2026.08.25-23` / `SCHEMA_VERSION` 6; el motor está en
+  `2026.08.28-24` / `SCHEMA_VERSION` 7 desde v24. Solo el número: `docs/columnas.md` sigue
+  perfilado contra `run_20260826_021034` y reperfilarlo es otra tarea.
+- **Los siete archivos de regresión se quedan en `tests/makro_plazavea/`, vivos.** Una mudanza manual
+  previa los había llevado a `tests/probes/makro_plazavea/`, donde **no corrían**: cada uno resuelve la
+  raíz del repo como `parents[2]` desde su propia ruta, y un nivel más abajo eso apunta a `tests/`, con
+  `ModuleNotFoundError: No module named 'retail_engine'`. Es la **segunda vez** que pasa lo mismo (ver
+  `[1.1.0]`, "Los cuatro archivos de regresión se mudan…"), así que la dependencia de profundidad quedó
+  documentada explícitamente en `CLAUDE.md` y `README.md`. No son etapa vieja: prueban funciones puras
+  del motor que el rumbo nuevo hereda entero — el precio mayorista es "que compren barato" y
+  `SIN_STOCK_LOCAL_CADENA_CON_STOCK` es "oportunidad de surtido".
+- **Conteos corregidos en `CLAUDE.md` y `README.md`**: la suite tiene **73 funciones `test_` en siete
+  archivos**, no 59 en seis — `test_teaser_de_tarjeta.py` entró con v24 y los conteos no se habían
+  actualizado.
+- **Deuda registrada, no resuelta**: `test_propiedades_corrida.py` apunta a
+  `data/makro_plazavea/run_20260822_020027`, corrida que ya no está en disco, así que **se saltea y
+  reporta verde sin afirmar nada**. Queda anotada en `CLAUDE.md` para re-apuntarla a
+  `run_20260826_021034` como cambio propio.
 - **`docs/columnas.md`, nuevo: el diccionario de las 79 columnas de `Fila`.** Una entrada por
   columna con qué responde, por qué existe, todos los valores que el código puede producir (no solo
   los observados), qué significa su vacío y dónde se asigna. Salió de leer el motor y de perfilar

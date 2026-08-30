@@ -14,10 +14,11 @@ answered, and how sure the engine is about it. Correctness before coverage.
 | `makro_plazavea` | Makro Perú (VTEX storefront) | working — 2 branches: 359 Santa Anita, 360 Surco |
 | `makro_pe` | Makro Perú, other source | not started, and deliberately so |
 
-Package version **1.2.0**; engine version `2026.08.25-23`, `SCHEMA_VERSION 6`, 79 columns per row.
+Package version **1.2.0**; engine version `2026.08.28-24`, `SCHEMA_VERSION 7`, 79 columns per row.
 1.1.0 shipped the wholesale (bi-price) columns and the one-folder-per-run layout; 1.2.0 added
-`--categoria`. Six engine versions since — v18 through v23 — are **released in git but not tagged
-as a package release**; two of them move `SCHEMA_VERSION` (4 → 5 in v18, 5 → 6 in v20), so read
+`--categoria`. Seven engine versions since — v18 through v24 — are **released in git but not tagged
+as a package release**; three of them move `SCHEMA_VERSION` (4 → 5 in v18, 5 → 6 in v20, 6 → 7 in
+v24), so read
 `CHANGELOG.md`'s `[Sin publicar]` section before consolidating runs from different dates.
 
 The two branches are a decision, not a limitation: branch attribution is proven correct on a small
@@ -47,23 +48,32 @@ its selection promised, 2 bad arguments or missing Playwright, 130 Ctrl-C.
 
 ## Tests
 
-59 `test_` functions under `tests/makro_plazavea/`, none of which touch the network. Pytest is not
-a declared dependency; each file also runs standalone and exits 0/1:
+64 `test_` functions across six files under `tests/makro_plazavea/`, none of which touch the
+network. Pytest is not a declared dependency; each file also runs standalone and exits 0/1:
 
 ```bash
 python3 tests/makro_plazavea/test_precio_mayorista.py
 python -m pytest tests/ -q                              # if pytest is installed
 ```
 
-`tests/probes/` holds exploratory probes, not regression — the two are not interchangeable.
+Each file resolves the repo root as `parents[2]` from its own path, so the depth
+`tests/<colector>/<archivo>.py` is load-bearing: moved one level deeper the suite dies with
+`ModuleNotFoundError`. The five exploratory probes that found the bi-price are archived under
+`tests/historia/sondas_makro_plazavea/` and do not run — a probe is not regression, and the two are
+not interchangeable.
 
 ## Layout
 
 ```
 src/retail_engine/collectors/makro_plazavea.py   the engine
 ops/                                             operational tools; they never measure prices
-tests/makro_plazavea/                            the regression suite
+docs/columnas.md                                 live: the dictionary of the 79 columns
+docs/historia/                                   archived: the closed 1.1.0-era record
+docs/bodegueros/                                 the new direction (Los Bodegueros)
+tests/makro_plazavea/                            the regression suite — six files, all live
 tests/fixtures/makro_plazavea/                   golden baseline + 23 hand-captured storefront cards
+tests/historia/sondas_makro_plazavea/            archived: five exploratory probes, they do not run
+tests/historia/regresion_makro_plazavea/         archived: one regression test whose run was deleted
 data/                                            generated output (gitignored)
 ```
 
@@ -71,13 +81,16 @@ data/                                            generated output (gitignored)
 
 - `CLAUDE.md` — guiding principles, architecture, and how to run and verify a change. Read it
   before touching extraction logic. It is the only document kept current by design.
-- `CHANGELOG.md` — release history, plus `[Sin publicar]` for v18–v23.
+- `CHANGELOG.md` — release history, plus `[Sin publicar]` for v18–v24.
 - `docs/columnas.md` — the column dictionary: what each of the 79 `filas.csv` columns says, why it
   exists, what its empty cell means, and which ones changed meaning between schema versions.
-- `docs/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped. Historical: parts of it were
-  superseded by later versions and are annotated in place.
-- `docs/brief_*.md` — three closed work orders, kept for the evidence behind each change.
-- `docs/contradicciones.md` — the documentation audit run before 1.1.0, with its resolutions.
+- `docs/historia/` — archived record of the 1.1.0 era. Nothing there is a roadmap; it is kept
+  because it holds the evidence that forced each change. See `docs/historia/LEEME.md`.
+  - `decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped. Parts of it were superseded by
+    later versions and are annotated in place. Still cited from `CLAUDE.md` and `docs/columnas.md`.
+  - `brief_*.md` — three closed work orders.
+  - `contradicciones.md` — the documentation audit run before 1.1.0, with its resolutions.
+- `docs/bodegueros/` — the new direction. See `docs/bodegueros/README.md`.
 
 ## License
 
