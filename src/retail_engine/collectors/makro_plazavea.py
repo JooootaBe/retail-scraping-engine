@@ -157,7 +157,7 @@ from typing import Any
 #
 # Y la cabecera muestra el nombre real del archivo que se está ejecutando,
 # que es el dato que faltaba para notar que se corría el que no era.
-VERSION = "2026.08.25-23"
+VERSION = "2026.08.28-24"
 
 # Versión del esquema de salida. Se graba en CADA fila: cuando el CSV
 # termine en Parquet/PostgreSQL, una fila vieja tiene que poder decir con
@@ -195,9 +195,69 @@ VERSION = "2026.08.25-23"
 # evaluó nada"), y `stock_signal` renombra sus tres valores de quiebre. Una
 # fila v19 y una v20 no se pueden apilar bajo la misma cabecera NI leer con
 # el mismo diccionario de valores.
-SCHEMA_VERSION = "6"
+#
+# v24 sube a "7" por un tercer motivo, distinto de los dos anteriores: no
+# cambia la FORMA (cabecera idéntica, 79 columnas) ni la DEFINICIÓN
+# (`precio_mayorista` sigue siendo `list_price − descuento`), sino el VALOR.
+# Hasta v23 `descuento_monto` podía traer el descuento de un teaser
+# condicionado a tarjeta en vez del bi-precio, y `precio_mayorista` salía
+# calculado sobre él. Medido: 6 filas por corrida en las dos corridas en
+# disco, con `biprecio_status` falseado en 4 y 6 de ellas.
+#
+# Que sea un bug y no un cambio de criterio es justamente por qué el bump
+# hace falta. Una columna cuyo valor era incorrecto en una época y correcto
+# en la siguiente tiene dos poblaciones bajo el mismo nombre, y la capa de
+# consolidación necesita poder separarlas para no promediar filas
+# contaminadas con filas sanas. `schema_version` es lo único que puede
+# decírselo: la cabecera no cambió, así que no hay ninguna otra señal.
+SCHEMA_VERSION = "7"
 
 CAMBIOS = [
+    "24  el descuento del bi-precio se elige por RÉGIMEN, no por posición."
+    " SCHEMA_VERSION sube a 7 SIN tocar la cabecera: no cambia la forma ni"
+    " la definición de ninguna columna, cambia el VALOR de dos que estaban"
+    " mal. Es un tercer motivo de bump, distinto del de v15 (forma) y del de"
+    " v18/v20 (significado) — ver el comentario de SCHEMA_VERSION ·"
+    " EL HECHO: SKU 11776631, mismo nodo, dos días seguidos. El 26 traía"
+    " solo el teaser del bi-precio (0.90) y salió descuento_monto 0.90 /"
+    " precio_mayorista 29.10. El 27 apareció además un teaser condicionado a"
+    " tarjeta (6.00) y la misma fila salió descuento_monto 6.00 /"
+    " precio_mayorista 24.00. S/ 5,10 de salto sin que el escalón cambiara ·"
+    " LA CAUSA: leer_descuento recorría la respuesta entera y devolvía el"
+    " primer PromotionalPriceTableItemsDiscount que encontrara, a cualquier"
+    " profundidad, sin saber de qué teaser lo estaba sacando; leer_regimen"
+    " tomaba el primer teaser con descuento. VTEX pone los teasers de"
+    " tarjeta PRIMERO en ratesAndBenefitsData.teaser[], así que ganaban"
+    " siempre. La posición en un array que VTEX no se comprometió a ordenar"
+    " estaba decidiendo un precio ·"
+    " POR QUÉ EL NO-TARJETA ES EL QUE MANDA, medido y no supuesto: en"
+    " run_20260827_021218 línea 3447 (SKU 10012708, qty=2, tres teasers, sin"
+    " tarjeta seleccionada) VTEX aplicó SOLO el de PaymentMethodId=4 —"
+    " sellingPrice 1990 con priceTag de la tabla bipreciomakro. Los teasers"
+    " de tarjeta no se aplicaron NUNCA: 0 de 17 apariciones en las dos"
+    " corridas en disco, y no aparecen jamás en rateAndBenefitsIdentifiers ·"
+    " EL ARREGLO: PAYMENT_METHOD_IDS_TARJETA (dos cadenas, las observadas),"
+    " es_teaser_de_tarjeta y teasers_de_biprecio. leer_descuento y"
+    " leer_regimen leen de la lista filtrada. Entre dos teasers NO de"
+    " tarjeta se sigue tomando el primero: este fix separa regímenes por"
+    " medio de pago, no arbitra dentro del mismo medio ·"
+    " IGUALDAD EXACTA de la cadena entera, nunca substring: '208' suelto"
+    " aparece 13.000+ veces por corrida en paymentData.paymentSystems, que"
+    " es el catálogo de medios de pago del storefront y no una promoción ·"
+    " NO cambia la fórmula precio_mayorista = list_price − descuento, que"
+    " sigue siendo la de v18 y sigue dando 23/23 contra las fichas"
+    " publicadas. Cambia QUÉ descuento entra a ella ·"
+    " IMPACTO medido reprocesando el crudo: 6 filas por corrida cambian"
+    " descuento_monto (3 SKUs x 2 nodos, ni una más), 2 por corrida cambian"
+    " precio_mayorista, y 6 y 4 cambian biprecio_status — entre ellas dos"
+    " que afirmaban COMPLETO con un escalón publicado que no existía. Las"
+    " 3.156 filas restantes de cada corrida quedan idénticas ·"
+    " NO agrega la columna del descuento de tarjeta: hoy ese descuento"
+    " simplemente no entra a estas columnas. Su columna propia es un paso"
+    " posterior, y no se pierde nada que antes se guardara bien — lo que se"
+    " perdía era el bi-precio ·"
+    " tests/makro_plazavea/test_teaser_de_tarjeta.py, 14 casos con los"
+    " payloads verbatim del crudo. Con el bug repuesto falla 6 de 14.",
     "23  el estado por-corrida se reinicia desde una sola definición."
     " SCHEMA_VERSION sigue en 6: no cambia ninguna columna ·"
     " EL HECHO: la primera corrida en vivo de v22 murió con KeyError:"
@@ -3371,6 +3431,31 @@ def extraer_logistica(datos: Any, nodo: Nodo) -> dict[str, str]:
 PARAM_DESCUENTO = "PromotionalPriceTableItemsDiscount"
 PARAM_PAGO = "PaymentMethodId"
 
+# Los `PaymentMethodId` de los teasers CONDICIONADOS A TARJETA. Su descuento
+# no es el del bi-precio y no puede entrar a `precio_mayorista`.
+#
+# Por qué existe: VTEX pone estos teasers PRIMERO en
+# `ratesAndBenefitsData.teaser[]`, y hasta v23 el motor tomaba el primero que
+# encontrara. En run_20260827_021218 eso escribió el descuento de tarjeta
+# (6.00) de 11776631 en `descuento_monto` y movió su `precio_mayorista` de
+# 29.10 a 24.00 respecto del día anterior, sin que el escalón cambiara.
+#
+# Que el que manda es el NO condicionado a tarjeta está medido, no supuesto:
+# en run_20260827_021218 línea 3447 (SKU 10012708, qty=2, tres teasers, sin
+# tarjeta seleccionada) VTEX aplicó SOLO el de `PaymentMethodId = "4"`. Los
+# de tarjeta no se aplicaron nunca — 0 de 17 apariciones en las dos corridas.
+#
+# IGUALDAD EXACTA de la cadena entera, nunca `in` ni substring: `"208"`
+# suelto aparece 13.000+ veces por corrida en `paymentData.paymentSystems`,
+# que es el catálogo de medios de pago del storefront y no una promoción.
+# Un filtro por substring descartaría teasers legítimos de bi-precio.
+#
+# Agregar una cadena acá EXCLUYE filas del bi-precio: es un cambio con
+# consecuencias en el dataset y necesita evidencia de que ese régimen
+# tampoco se cobra sin la tarjeta. `test_la_constante_es_el_conjunto_medido`
+# lo fija a propósito.
+PAYMENT_METHOD_IDS_TARJETA = {"208,202,210", "203,502,501,210"}
+
 # Specifications del catálogo. El umbral SOLO existe acá: checkout no lo
 # devuelve nunca, y por eso catálogo y medición hay que unirlos por sku_id.
 SPEC_BI = "CantidadBiPrecioMK"
@@ -3456,14 +3541,60 @@ def teasers_con_descuento(objeto: Any) -> list[dict]:
     return [t for t in candidatos if parametros_por_nombre(t, PARAM_DESCUENTO)]
 
 
+def es_teaser_de_tarjeta(teaser: Any) -> bool:
+    """
+    ¿Este teaser está condicionado a pagar con una tarjeta determinada?
+
+    Se decide por `PaymentMethodId` y por IGUALDAD EXACTA de la cadena
+    completa contra `PAYMENT_METHOD_IDS_TARJETA` — ver el comentario de esa
+    constante para por qué un substring rompería esto.
+
+    Un teaser sin `PaymentMethodId` (existe: `mxn_4x3` condiciona por
+    `CollectionsIdsList`) NO es de tarjeta. La ausencia de la condición no
+    es una condición de tarjeta, y tratarla como tal descartaría un régimen
+    por no entenderlo.
+    """
+
+    return any(
+        s(pago) in PAYMENT_METHOD_IDS_TARJETA
+        for pago in parametros_por_nombre(teaser, PARAM_PAGO)
+    )
+
+
+def teasers_de_biprecio(objeto: Any) -> list[dict]:
+    """
+    Los teasers con descuento que NO están condicionados a tarjeta.
+
+    Es la lista de la que salen `descuento_monto` y, por la fórmula,
+    `precio_mayorista`. El descuento de un teaser de tarjeta es real y es
+    otra cosa: se anuncia, no se cobra sin la tarjeta, y hoy simplemente no
+    entra a estas columnas (su columna propia es un paso posterior).
+
+    Se conserva el orden de `teasers_con_descuento`: entre dos teasers NO de
+    tarjeta el motor sigue tomando el primero, igual que antes. Este filtro
+    separa regímenes por medio de pago; no arbitra dentro del mismo medio.
+    """
+
+    return [t for t in teasers_con_descuento(objeto) if not es_teaser_de_tarjeta(t)]
+
+
 def leer_descuento(objeto: Any) -> Decimal | None:
-    """El monto de descuento por unidad, en soles. `None` si no está."""
+    """
+    El monto de descuento por unidad del BI-PRECIO, en soles. `None` si no está.
 
-    for valor in parametros_por_nombre(objeto, PARAM_DESCUENTO):
-        numero = dec(valor)
+    Antes de v24 esto recorría la respuesta entera buscando el primer
+    `PromotionalPriceTableItemsDiscount` a cualquier profundidad, sin saber a
+    qué régimen pertenecía el número que devolvía. Con un teaser de tarjeta
+    presente —que VTEX pone primero— devolvía el descuento de la tarjeta y el
+    del bi-precio se perdía. Ahora se pregunta primero DE QUÉ TEASER se lee.
+    """
 
-        if numero is not None:
-            return numero
+    for teaser in teasers_de_biprecio(objeto):
+        for valor in parametros_por_nombre(teaser, PARAM_DESCUENTO):
+            numero = dec(valor)
+
+            if numero is not None:
+                return numero
 
     return None
 
@@ -3479,11 +3610,17 @@ def leer_regimen(objeto: Any) -> dict[str, str]:
     El catálogo trae el teaser SIN `id` (solo nombre) y `simulation` lo trae
     CON `id`. Por eso la medición es la fuente preferida y el catálogo el
     respaldo: entre las dos, la columna se llena.
+
+    Se lee de `teasers_de_biprecio`, NO de todos los teasers con descuento
+    (v24). Estas tres columnas describen el régimen que produjo
+    `descuento_monto`, así que tienen que mirar exactamente el mismo teaser:
+    nombrar `Promo Oh-Pay MAKRO` al lado de un descuento de bi-precio dejaría
+    la fila contradiciéndose sola.
     """
 
     salida = {"promo_regime_id": "", "promo_regime_name": "", "payment_method_id": ""}
 
-    for teaser in teasers_con_descuento(objeto):
+    for teaser in teasers_de_biprecio(objeto):
         salida["promo_regime_id"] = salida["promo_regime_id"] or campo(teaser, "id")
         salida["promo_regime_name"] = salida["promo_regime_name"] or campo(teaser, "name")
 
