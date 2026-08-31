@@ -26,7 +26,7 @@ Vale conocerlo antes de proponer construir algo nuevo:
 - **`precio_mayorista` y las 22 columnas del bi-precio** — es, literalmente, "que compren barato".
   Ojo con la epistemología: a `qty=1` el descuento no se aplica, así que el precio mayorista está
   **reconstruido por resta**, no observado. `precio_mayorista_verificado = NO` es la respuesta honesta
-  por defecto, no un hueco. Ver `CLAUDE.md`, "the wholesale price is reconstructed, not observed".
+  por defecto, no un hueco. Ver `CLAUDE.md`, "el precio mayorista se reconstruye, no se observa".
 - **`stock_signal = SIN_STOCK_LOCAL_CADENA_CON_STOCK`** — es, literalmente, "oportunidad de surtido":
   la sucursal no lo tiene y la cadena sí. Demanda real, quiebre visible.
 - **`docs/columnas.md`** — qué dice cada una de las 79 celdas y qué significa que esté vacía.

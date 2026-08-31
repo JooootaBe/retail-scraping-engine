@@ -1,97 +1,74 @@
-# retail-engine
+# retail-scraping-engine
 
-Price intelligence data collection for Peruvian retail. It queries a retailer's public
-storefront APIs and writes one row per (SKU, branch, run), so a pricing analyst can build a
-time series and compare branches downstream.
+Recopilación de datos de inteligencia de precios para el comercio peruano. Consulta las API públicas de las tiendas online de un minorista o mayorista y registra una fila por cada SKU, sucursal y ejecución, lo que permite a un analista de precios crear una serie temporal y comparar las sucursales posteriormente.
 
-The point is **branch attribution you can trust**: every row records which branch actually
-answered, and how sure the engine is about it. Correctness before coverage.
+El objetivo es **una atribución de sucursal fiable**: cada fila registra qué sucursal respondió realmente, y con qué grado de certeza lo hace el motor. Correctitud antes que cobertura.
 
-## Status
+## Estado
 
-| Collector | Retailer | State |
+| Colector | Minorista | Estado |
 |---|---|---|
-| `makro_plazavea` | Makro Perú (VTEX storefront) | working — 2 branches: 359 Santa Anita, 360 Surco |
-| `makro_pe` | Makro Perú, other source | not started, and deliberately so |
+| `makro_plazavea` | Makro Perú (tienda VTEX) | funcionando — 2 sucursales: 359 Santa Anita, 360 Surco |
+| `makro_pe` | Makro Perú, otra fuente | sin empezar, y deliberadamente |
 
-Package version **1.2.0**; engine version `2026.08.28-24`, `SCHEMA_VERSION 7`, 79 columns per row.
-1.1.0 shipped the wholesale (bi-price) columns and the one-folder-per-run layout; 1.2.0 added
-`--categoria`. Seven engine versions since — v18 through v24 — are **released in git but not tagged
-as a package release**; three of them move `SCHEMA_VERSION` (4 → 5 in v18, 5 → 6 in v20, 6 → 7 in
-v24), so read
-`CHANGELOG.md`'s `[Sin publicar]` section before consolidating runs from different dates.
+Versión del paquete **1.2.0**; versión del motor `2026.08.28-24`, `SCHEMA_VERSION 7`, 79 columnas por fila. La 1.1.0 entregó las columnas mayoristas (bi-precio) y el esquema de una carpeta por ejecución; la 1.2.0 agregó `--categoria`. Desde entonces hay siete versiones del motor — de la v18 a la v24 — **liberadas en git pero no etiquetadas como versión de paquete**; tres de ellas mueven `SCHEMA_VERSION` (4 → 5 en v18, 5 → 6 en v20, 6 → 7 en v24), así que lee la sección `[Sin publicar]` de `CHANGELOG.md` antes de consolidar ejecuciones de fechas distintas.
 
-The two branches are a decision, not a limitation: branch attribution is proven correct on a small
-set of nodes before more are added. `CLAUDE.md` explains why, and what it costs to add the 21st.
+Las dos sucursales son una decisión, no una limitación: la atribución de sucursal se prueba correcta sobre un conjunto pequeño de nodos antes de agregar más. `CLAUDE.md` explica por qué, y cuánto cuesta agregar la número 21.
 
-## Install
+## Instalación
 
 ```bash
-python -m pip install -e .     # Python >=3.12, pulls playwright>=1.62.0
+python -m pip install -e .     # Python >=3.12, instala playwright>=1.62.0
 playwright install chromium
 ```
 
-## Run
+## Ejecución
 
 ```bash
 python3 src/retail_engine/collectors/makro_plazavea.py --catalogo 300 --por-categoria 3 --muestra 100
 ```
 
-That discovers up to 300 SKUs, caps each subcategory at 3, and measures 100 of them against
-every configured branch. `--version` prints the engine version and its changelog without
-touching the network. The full flag list is in `CLAUDE.md`.
+Eso descubre hasta 300 SKUs, limita cada subcategoría a 3, y mide 100 de ellos contra cada sucursal configurada. `--version` imprime la versión del motor y su registro de cambios sin tocar la red. La lista completa de flags está en `CLAUDE.md`.
 
-Output lands in `data/makro_plazavea/run_<YYYYMMDD_HHMMSS>/` — one immutable folder per run,
-holding `filas.csv`, `run.json` and `raw.jsonl.gz`. Reading the whole history is a glob over
-`run_*/filas.csv`. The process exit code is meaningful: 0 complete, 1 the run delivered less than
-its selection promised, 2 bad arguments or missing Playwright, 130 Ctrl-C.
+La salida cae en `data/makro_plazavea/run_<YYYYMMDD_HHMMSS>/` — una carpeta inmutable por ejecución, que contiene `filas.csv`, `run.json` y `raw.jsonl.gz`. Leer toda la historia es un glob sobre `run_*/filas.csv`. El código de salida del proceso es significativo: 0 completa, 1 la ejecución entregó menos de lo que prometía su selección, 2 argumentos inválidos o Playwright ausente, 130 Ctrl-C.
 
-## Tests
+## Pruebas
 
-64 `test_` functions across six files under `tests/makro_plazavea/`, none of which touch the
-network. Pytest is not a declared dependency; each file also runs standalone and exits 0/1:
+64 funciones `test_` repartidas en seis archivos bajo `tests/makro_plazavea/`, ninguna de las cuales toca la red. Pytest no es una dependencia declarada; cada archivo también corre de forma independiente y sale con 0/1:
 
 ```bash
 python3 tests/makro_plazavea/test_precio_mayorista.py
-python -m pytest tests/ -q                              # if pytest is installed
+python -m pytest tests/ -q                              # si pytest está instalado
 ```
 
-Each file resolves the repo root as `parents[2]` from its own path, so the depth
-`tests/<colector>/<archivo>.py` is load-bearing: moved one level deeper the suite dies with
-`ModuleNotFoundError`. The five exploratory probes that found the bi-price are archived under
-`tests/historia/sondas_makro_plazavea/` and do not run — a probe is not regression, and the two are
-not interchangeable.
+Cada archivo resuelve la raíz del repositorio como `parents[2]` desde su propia ruta, así que la profundidad `tests/<colector>/<archivo>.py` es estructural: movido un nivel más abajo, la suite muere con `ModuleNotFoundError`. Las cinco sondas exploratorias que encontraron el bi-precio están archivadas en `tests/historia/sondas_makro_plazavea/` y no corren — una sonda no es una prueba de regresión, y las dos no son intercambiables.
 
-## Layout
+## Estructura
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine
-ops/                                             operational tools; they never measure prices
-docs/columnas.md                                 live: the dictionary of the 79 columns
-docs/historia/                                   archived: the closed 1.1.0-era record
-docs/bodegueros/                                 the new direction (Los Bodegueros)
-tests/makro_plazavea/                            the regression suite — six files, all live
-tests/fixtures/makro_plazavea/                   golden baseline + 23 hand-captured storefront cards
-tests/historia/sondas_makro_plazavea/            archived: five exploratory probes, they do not run
-tests/historia/regresion_makro_plazavea/         archived: one regression test whose run was deleted
-data/                                            generated output (gitignored)
+src/retail_engine/collectors/makro_plazavea.py   el motor
+ops/                                             herramientas operativas; nunca miden precios
+docs/columnas.md                                 vivo: el diccionario de las 79 columnas
+docs/historia/                                   archivado: el registro cerrado de la era 1.1.0
+docs/bodegueros/                                 el nuevo rumbo (Los Bodegueros)
+tests/makro_plazavea/                            la suite de regresión — seis archivos, todos vivos
+tests/fixtures/makro_plazavea/                   línea base golden + 23 fichas de tienda capturadas a mano
+tests/historia/sondas_makro_plazavea/            archivado: cinco sondas exploratorias, no corren
+tests/historia/regresion_makro_plazavea/         archivado: una prueba de regresión cuya ejecución fue borrada
+data/                                            salida generada (gitignored)
 ```
 
-## Where things are documented
+## Dónde está documentado cada cosa
 
-- `CLAUDE.md` — guiding principles, architecture, and how to run and verify a change. Read it
-  before touching extraction logic. It is the only document kept current by design.
-- `CHANGELOG.md` — release history, plus `[Sin publicar]` for v18–v24.
-- `docs/columnas.md` — the column dictionary: what each of the 79 `filas.csv` columns says, why it
-  exists, what its empty cell means, and which ones changed meaning between schema versions.
-- `docs/historia/` — archived record of the 1.1.0 era. Nothing there is a roadmap; it is kept
-  because it holds the evidence that forced each change. See `docs/historia/LEEME.md`.
-  - `decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped. Parts of it were superseded by
-    later versions and are annotated in place. Still cited from `CLAUDE.md` and `docs/columnas.md`.
-  - `brief_*.md` — three closed work orders.
-  - `contradicciones.md` — the documentation audit run before 1.1.0, with its resolutions.
-- `docs/bodegueros/` — the new direction. See `docs/bodegueros/README.md`.
+- `CLAUDE.md` — principios rectores, arquitectura, y cómo ejecutar y verificar un cambio. Léelo antes de tocar la lógica de extracción. Es el único documento mantenido al día por diseño.
+- `CHANGELOG.md` — historial de versiones, más `[Sin publicar]` para v18–v24.
+- `docs/columnas.md` — el diccionario de columnas: qué dice cada una de las 79 columnas de `filas.csv`, por qué existe, qué significa su celda vacía, y cuáles cambiaron de significado entre versiones de esquema.
+- `docs/historia/` — registro archivado de la era 1.1.0. Nada de ahí es una hoja de ruta; se conserva porque contiene la evidencia que forzó cada cambio. Ver `docs/historia/LEEME.md`.
+  - `decisiones_1.1.0.md` — inventario cerrado de lo que entregó la 1.1.0. Partes fueron superadas por versiones posteriores y están anotadas en su lugar. Aún se cita desde `CLAUDE.md` y `docs/columnas.md`.
+  - `brief_*.md` — tres órdenes de trabajo cerradas.
+  - `contradicciones.md` — la auditoría de documentación previa a la 1.1.0, con sus resoluciones.
+- `docs/bodegueros/` — el nuevo rumbo. Ver `docs/bodegueros/README.md`.
 
-## License
+## Licencia
 
-Private. Not licensed for redistribution.
+Privada. No licenciada para su redistribución.

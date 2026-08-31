@@ -1,700 +1,715 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Este archivo le da orientación a Claude Code (claude.ai/code) cuando trabaja con el código de este repositorio.
 
-## Mission — read this before touching extraction logic
+## Misión — leer esto antes de tocar la lógica de extracción
 
-This is not a generic scraper. It is the data-collection engine for a **price intelligence practice**:
-every design decision exists so that a pricing analyst can trust a row's branch attribution enough to
-build a strategy on top of it. The engine currently tracks two Makro Perú branches (359 Santa Anita,
-360 Surco), and that is deliberate — **Nivel 1: Correctness** comes before **Nivel 2: Coverage**.
-That principle was learned through two failed rewrites of this engine; this file is now the only place
-that record survives. Prove branch resolution is airtight on a small, well-understood set of nodes
-before adding more.
+Esto no es un scraper genérico. Es el motor de recolección de datos de una **práctica de inteligencia de
+precios**: cada decisión de diseño existe para que un analista de pricing pueda confiar en la atribución de
+sucursal de una fila lo suficiente como para construir una estrategia encima. Hoy el motor sigue dos
+sucursales de Makro Perú (359 Santa Anita, 360 Surco), y eso es deliberado — **Nivel 1: Correctitud** va
+antes que **Nivel 2: Cobertura**. Ese principio se aprendió a través de dos reescrituras fallidas de este
+motor; este archivo es hoy el único lugar donde sobrevive ese registro. Probá que la resolución de sucursal
+es hermética sobre un conjunto chico de nodos bien entendidos antes de agregar más.
 
-Every change should be judged against this question: **does it make branch attribution more correct, or
-does it just make the dataset bigger?** A bigger dataset with fuzzy attribution is worse than a small one
-you can trust. Never add a branch faster than you can verify its signature is real (see "Scaling to 20+
-branches").
+Cada cambio se juzga contra esta pregunta: **¿hace más correcta la atribución de sucursal, o solo hace más
+grande el dataset?** Un dataset más grande con atribución difusa es peor que uno chico en el que se puede
+confiar. Nunca agregues una sucursal más rápido de lo que podés verificar que su firma es real (ver
+"Escalar a 20+ sucursales").
 
-## What this is
+## Qué es esto
 
-A single-purpose extractor: it pulls per-branch (sucursal) retail prices from Makro Perú's VTEX-powered
-storefront (`www.makro.plazavea.com.pe`) using Playwright's async `APIRequestContext` to call VTEX's
-public `simulation` / `orderForm` APIs directly (no page scraping, no purchases). The extraction logic is
-still **one file**: a single module inside an installable package. Six regression files cover the pure
-rules — under pytest or standalone, none of them touching the network — so they are the first check on a
-change and never the last one.
+Un extractor de propósito único: saca precios de retail por sucursal del storefront de Makro Perú, montado
+sobre VTEX (`www.makro.plazavea.com.pe`), usando el `APIRequestContext` asíncrono de Playwright para llamar
+directo a las APIs públicas `simulation` / `orderForm` de VTEX (sin scraping de páginas, sin compras). La
+lógica de extracción sigue siendo **un solo archivo**: un módulo dentro de un paquete instalable. Seis
+archivos de regresión cubren las reglas puras — bajo pytest o de forma independiente, ninguno toca la red —
+así que son la primera verificación de un cambio, y nunca la última.
 
 ```
-src/retail_engine/collectors/makro_plazavea.py   the engine (VERSION 2026.08.28-24, SCHEMA_VERSION 7, 79 columns)
-pyproject.toml                                   package `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
-CHANGELOG.md                                     released and unreleased changes
-docs/columnas.md                                 the column dictionary — what each of the 79 columns says
-docs/historia/decisiones_1.1.0.md                closed inventory of what 1.1.0 shipped — archived, still cited
-docs/historia/brief_*.md                         three closed work orders — history, not a roadmap
-docs/historia/contradicciones.md                 the pre-1.1.0 documentation audit and its resolutions
-docs/bodegueros/                                 the new direction (Los Bodegueros) — its own space
-tests/makro_plazavea/                            the regression suite — permanent, six files, all live
-tests/makro_plazavea/test_precio_mayorista.py    23 storefront cards — the only EXTERNAL truth in the repo
-tests/makro_plazavea/test_precio_en_quiebre.py   the six branches of price_origin, rows built by hand
-tests/makro_plazavea/test_teaser_de_tarjeta.py   the card teaser: régimen and descuento, payloads verbatim
-tests/makro_plazavea/test_truncamiento.py        the four cases of the pagination ceiling
-tests/makro_plazavea/test_auditoria_mayorista.py the wholesale audit: expectation, propagation, strata
-tests/makro_plazavea/test_estado_por_corrida.py  run-scoped globals survive their own reset
-tests/historia/sondas_makro_plazavea/            five exploratory probes (v1…v5) — archived, they do not run
-tests/historia/regresion_makro_plazavea/         test_propiedades_corrida.py — archived, its run is gone
-tests/fixtures/makro_plazavea/golden_v5.csv      baseline produced by probe v5, with its own README
-tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv   the 23 hand-captured cards test_precio_mayorista.py reads
-ops/                                             operational tools — NOT the engine; they never measure prices
-ops/arbol_categorias.py                          snapshots the category tree and diffs it against the last one
-ops/obtener_nodo_logistico_mk.py                 captures a branch's live logistics signature (headed, standalone)
-data/                                            generated output (gitignored, `.gitignore:32`)
+src/retail_engine/collectors/makro_plazavea.py   el motor (VERSION 2026.08.28-24, SCHEMA_VERSION 7, 79 columnas)
+pyproject.toml                                   paquete `retail-engine` 1.2.0, Python >=3.12, playwright>=1.62.0
+CHANGELOG.md                                     cambios publicados y sin publicar
+docs/columnas.md                                 el diccionario de columnas — qué dice cada una de las 79
+docs/historia/decisiones_1.1.0.md                inventario cerrado de lo que entregó 1.1.0 — archivado, aún citado
+docs/historia/brief_*.md                         tres órdenes de trabajo cerradas — historia, no hoja de ruta
+docs/historia/contradicciones.md                 la auditoría de documentación previa a 1.1.0 y sus resoluciones
+docs/bodegueros/                                 el rumbo nuevo (Los Bodegueros) — su propio espacio
+tests/makro_plazavea/                            la suite de regresión — permanente, seis archivos, todos vivos
+tests/makro_plazavea/test_precio_mayorista.py    23 fichas del storefront — la única verdad EXTERNA del repo
+tests/makro_plazavea/test_precio_en_quiebre.py   las seis ramas de price_origin, filas armadas a mano
+tests/makro_plazavea/test_teaser_de_tarjeta.py   el teaser de tarjeta: régimen y descuento, payloads textuales
+tests/makro_plazavea/test_truncamiento.py        los cuatro casos del techo de paginación
+tests/makro_plazavea/test_auditoria_mayorista.py la auditoría mayorista: expectativa, propagación, estratos
+tests/makro_plazavea/test_estado_por_corrida.py  los globales por corrida sobreviven a su propio reset
+tests/historia/sondas_makro_plazavea/            cinco sondas exploratorias (v1…v5) — archivadas, no corren
+tests/historia/regresion_makro_plazavea/         test_propiedades_corrida.py — archivado, su corrida ya no está
+tests/fixtures/makro_plazavea/golden_v5.csv      línea base producida por la sonda v5, con su propio README
+tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv   las 23 fichas capturadas a mano que lee test_precio_mayorista.py
+ops/                                             herramientas operativas — NO el motor; nunca miden precios
+ops/arbol_categorias.py                          fotografía el árbol de categorías y lo difea contra el anterior
+ops/obtener_nodo_logistico_mk.py                 captura la firma logística viva de una sucursal (headed, independiente)
+data/                                            salida generada (gitignored, `.gitignore:32`)
 ```
 
-`ops/` is a deliberate boundary, not a folder for leftovers. Anything there runs by hand or by cron, never
-modifies the engine and is never imported *by* it, and answers a question *about* the catalog or a branch
-instead of extracting prices. Note the contract is one-directional: an ops tool may import the engine, but
-it does not have to. Two live there today.
+`ops/` es una frontera deliberada, no una carpeta para sobras. Lo que está ahí corre a mano o por cron, nunca
+modifica el motor y nunca es importado *por* él, y responde una pregunta *sobre* el catálogo o una sucursal en
+vez de extraer precios. Ojo que el contrato es de una sola dirección: una herramienta de ops puede importar el
+motor, pero no está obligada. Hoy viven dos ahí.
 
-`arbol_categorias.py` does import the engine, and exists because a new category is a commercial signal —
-someone on the other side decided to start selling something — and until now it entered the traversal in
-silence. `obtener_nodo_logistico_mk.py` imports nothing from `retail_engine` (only Playwright, headed): it
-captures a branch's real logistics signature from a live checkout, which is the evidence a new `NODOS` entry
-needs *before* it is trusted — see "Scaling to 20+ branches", where the cost of a wrong signature is a branch
-that looks covered and contributes zero verified prices.
+`arbol_categorias.py` sí importa el motor, y existe porque una categoría nueva es una señal comercial —alguien
+del otro lado decidió empezar a vender algo— y hasta ahora entraba al recorrido en silencio.
+`obtener_nodo_logistico_mk.py` no importa nada de `retail_engine` (solo Playwright, headed): captura la firma
+logística real de una sucursal desde un checkout vivo, que es la evidencia que una entrada nueva de `NODOS`
+necesita *antes* de ser confiable — ver "Escalar a 20+ sucursales", donde el costo de una firma equivocada es
+una sucursal que parece cubierta y aporta cero precios verificados.
 
-The project exists to build a time series of prices per SKU per branch so a pricing analyst can compare
-branches later in SQL/pandas. **The extractor itself never compares branches and never drops rows** —
-see "Guiding principles" before changing extraction logic.
+El proyecto existe para construir una serie temporal de precios por SKU y por sucursal, de modo que un analista
+de pricing pueda comparar sucursales después en SQL/pandas. **El extractor mismo nunca compara sucursales y
+nunca descarta filas** — leé "Principios rectores" antes de cambiar la lógica de extracción.
 
-## Running it
+## Cómo ejecutarlo
 
 ```bash
 python -m pip install -e .
-playwright install chromium          # the default --canal is "chrome"; falls back to managed Chromium
+playwright install chromium          # el --canal por defecto es "chrome"; cae al Chromium gestionado
 
 MK=src/retail_engine/collectors/makro_plazavea.py
 
-python3 $MK --version                                        # version + changelog, no network
-python3 $MK --catalogo 300 --por-categoria 3 --muestra 100   # normal test run
-python3 $MK --tope 60000                                     # full catalog (slow, deliberate)
-python3 $MK --modo orderform                                 # 3-request flow instead of simulation
-python3 $MK --categoria "/399/"                              # only that branch of the tree
-python3 $MK --skus 10012716,11401644                         # measure an explicit list, no discovery
-python3 $MK --dry-run --skus 10012716                        # measure, print, write nothing
-python3 $MK --salida /otra/ruta                              # write elsewhere
+python3 $MK --version                                        # versión + changelog, sin red
+python3 $MK --catalogo 300 --por-categoria 3 --muestra 100   # corrida de prueba normal
+python3 $MK --tope 60000                                     # catálogo completo (lento, deliberado)
+python3 $MK --modo orderform                                 # flujo de 3 requests en vez de simulation
+python3 $MK --categoria "/399/"                              # solo esa rama del árbol
+python3 $MK --skus 10012716,11401644                         # mide una lista explícita, sin descubrimiento
+python3 $MK --dry-run --skus 10012716                        # mide, imprime, no escribe nada
+python3 $MK --salida /otra/ruta                              # escribe en otro lado
 ```
 
-Flags that matter: `--catalogo N` (stop discovery at N SKUs), `--muestra N` (how many discovered SKUs get
-measured; deterministic hash selection), `--por-categoria N` (max SKUs per subcategory — makes the sample
-*wide* instead of the first two categories of the tree), `--semilla` (salt of the selection hash),
-`--presupuesto-descubrimiento N` (request budget reserved for discovery only), `--tope N` (hard request
-cap per run; 0 = auto), `--intervalo` (seconds between requests, default 1.5), `--reintentos` (429/5xx
-retries, default 3), `--auditoria PCT` (% of measurements cross-checked simulation vs orderForm, default
-5, 0 disables), `--sin-evidencia` (skip archiving raw JSON), `--modo simulation|orderform` (1 request vs
-the 3-request flow), `--salida` (collector root; the run folder is still created inside it), `--version`
-(prints `VERSION` + `CAMBIOS` and exits, no network), `--headed` / `--canal`. With `--categoria`, `--skus`,
-`--dry-run` and `--auditoria-mayorista` below, that is the whole argparse surface — 19 flags. If you add
-one, it belongs in this paragraph or in one below it, not only in the `--help`.
+Los flags que importan: `--catalogo N` (corta el descubrimiento en N SKUs), `--muestra N` (cuántos de los SKUs
+descubiertos se miden; selección determinista por hash), `--por-categoria N` (máximo de SKUs por subcategoría —
+hace que la muestra sea *ancha* en vez de las primeras dos categorías del árbol), `--semilla` (sal del hash de
+selección), `--presupuesto-descubrimiento N` (presupuesto de requests reservado solo para descubrimiento),
+`--tope N` (tope duro de requests por corrida; 0 = automático), `--intervalo` (segundos entre requests, 1.5 por
+defecto), `--reintentos` (reintentos ante 429/5xx, 3 por defecto), `--auditoria PCT` (% de mediciones
+contrastadas simulation vs orderForm, 5 por defecto, 0 lo desactiva), `--sin-evidencia` (no archiva el JSON
+crudo), `--modo simulation|orderform` (1 request contra el flujo de 3), `--salida` (raíz del colector; la
+carpeta de la corrida se sigue creando adentro), `--version` (imprime `VERSION` + `CAMBIOS` y sale, sin red),
+`--headed` / `--canal`. Con `--categoria`, `--skus`, `--dry-run` y `--auditoria-mayorista` de más abajo, ésa es
+toda la superficie de argparse — 19 flags. Si agregás uno, va en este párrafo o en alguno de abajo, no solo en
+el `--help`.
 
-1.2.0 added `--categoria "/399/,/77/"` — see "Guiding principle: scope is chosen, not inherited from
-the tree" below; it is the flag with the most reasoning behind it.
+1.2.0 agregó `--categoria "/399/,/77/"` — ver "Principio rector: el alcance se elige, no se hereda del árbol"
+más abajo; es el flag con más razonamiento detrás.
 
-Three flags came with 1.1.0. `--skus <lista>` (max 20) measures an explicit list and skips discovery —
-it is incompatible with `--catalogo` / `--muestra` on purpose, because a run must have exactly one
-answer to "how was this selected"; the manifest records `modo_seleccion` so these runs can be filtered
-out of the series later. `--dry-run` measures and prints without writing anything, not even the run
-folder. `--auditoria-mayorista N` (default 3, 0 disables) is the only place the engine asks for
-`qty > 1` — see "Guiding principle: the wholesale price is reconstructed, not observed".
+Tres flags llegaron con 1.1.0. `--skus <lista>` (máximo 20) mide una lista explícita y saltea el descubrimiento
+— es incompatible con `--catalogo` / `--muestra` a propósito, porque una corrida tiene que tener exactamente
+una respuesta a "cómo se seleccionó esto"; el manifiesto registra `modo_seleccion` para poder filtrar después
+estas corridas de la serie. `--dry-run` mide e imprime sin escribir nada, ni siquiera la carpeta de la corrida.
+`--auditoria-mayorista N` (3 por defecto, 0 lo desactiva) es el único lugar donde el motor pide `qty > 1` — ver
+"Principio rector: el precio mayorista se reconstruye, no se observa".
 
-**`--reiniciar` no longer exists.** It deleted the per-branch CSVs to "restart the series", which made
-sense when the series was one mutable file being appended to. With one immutable folder per run there is
-no accumulated file to reset, and the only thing the flag could still delete is closed history. A flag
-whose only possible effect is destroying the past does not get redefined — it gets removed.
+**`--reiniciar` ya no existe.** Borraba los CSVs por sucursal para "reiniciar la serie", lo que tenía sentido
+cuando la serie era un solo archivo mutable al que se le hacía append. Con una carpeta inmutable por corrida no
+hay archivo acumulado que reiniciar, y lo único que el flag todavía podría borrar es historia cerrada. Un flag
+cuyo único efecto posible es destruir el pasado no se redefine — se saca.
 
-**The regression suite is the first step in verifying any change.** 64 `test_` functions across six
-files under `tests/makro_plazavea/`, none of which touches the network:
+**La suite de regresión es el primer paso para verificar cualquier cambio.** 64 funciones `test_` repartidas en
+seis archivos bajo `tests/makro_plazavea/`, ninguna de las cuales toca la red:
 
 ```bash
-python -m pytest tests/ -q                              # all six at once
-python3 tests/makro_plazavea/test_precio_mayorista.py   # each file also runs standalone, exits 0/1
+python -m pytest tests/ -q                              # los seis de una
+python3 tests/makro_plazavea/test_precio_mayorista.py   # cada archivo también corre solo, sale 0/1
 ```
 
-No lint or build tooling is wired up, and **pytest is not a declared dependency** — install it, or run
-each file on its own. Exploratory probes are not regression and the two are not interchangeable — a probe
-may be edited or thrown away, a regression file is a promise. The five probes that found the bi-price now
-live archived under `tests/historia/sondas_makro_plazavea/` and **do not run**; if the new direction needs
-exploratory scripts, they get a fresh folder rather than being mixed back in here.
+No hay herramientas de lint ni de build conectadas, y **pytest no es una dependencia declarada** — instalalo, o
+corré cada archivo por su cuenta. Las sondas exploratorias no son regresión y las dos cosas no son
+intercambiables: una sonda se puede editar o tirar, un archivo de regresión es una promesa. Las cinco sondas
+que encontraron el bi-precio ahora viven archivadas en `tests/historia/sondas_makro_plazavea/` y **no corren**;
+si el rumbo nuevo necesita scripts exploratorios, van a una carpeta nueva en vez de volver a mezclarse acá.
 
-**Each regression file resolves the repo root as `parents[2]` from its own path, so the depth
-`tests/<colector>/<archivo>.py` is load-bearing, not cosmetic.** Moved one level deeper the whole suite
-dies with `ModuleNotFoundError: No module named 'retail_engine'` — silently, if whatever runs them
-swallows the exit code. It has happened twice: once before 1.1.0 (`CHANGELOG.md`, `[1.1.0]`) and once on
-2026-08-30. Do not relocate these files without editing `parents[2]` in each one.
+**Cada archivo de regresión resuelve la raíz del repo como `parents[2]` desde su propia ruta, así que la
+profundidad `tests/<colector>/<archivo>.py` es estructural, no cosmética.** Movido un nivel más abajo, la suite
+entera muere con `ModuleNotFoundError: No module named 'retail_engine'` — en silencio, si lo que los ejecuta se
+traga el código de salida. Ya pasó dos veces: una antes de 1.1.0 (`CHANGELOG.md`, `[1.1.0]`) y otra el
+2026-08-30. No reubiques estos archivos sin editar el `parents[2]` de cada uno.
 
-The six files:
-`test_precio_mayorista.py` (23 storefront cards, read from
-`tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv`), `test_precio_en_quiebre.py` (the six
-`price_origin` branches, hand-built rows), `test_teaser_de_tarjeta.py` (the card teaser's régimen and
-descuento, payloads verbatim from the raw), `test_truncamiento.py` (the pagination
-ceiling) and `test_auditoria_mayorista.py` (the wholesale audit's expectation, propagation and strata) and
-`test_estado_por_corrida.py` (the run-scoped globals, whose reset lived unreachable inside `main()`
-until v23). Each also
-prints a report and exits 0/1 when run standalone.
+Los seis archivos:
+`test_precio_mayorista.py` (23 fichas del storefront, leídas de
+`tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv`), `test_precio_en_quiebre.py` (las seis ramas de
+`price_origin`, filas armadas a mano), `test_teaser_de_tarjeta.py` (el régimen y el descuento del teaser de
+tarjeta, payloads textuales del crudo), `test_truncamiento.py` (el techo de paginación) y
+`test_auditoria_mayorista.py` (la expectativa, la propagación y los estratos de la auditoría mayorista) y
+`test_estado_por_corrida.py` (los globales por corrida, cuyo reset vivía inalcanzable dentro de `main()` hasta
+v23). Cada uno además imprime un reporte y sale 0/1 cuando se corre solo.
 
-**64 is the count of `test_` functions, which is what pytest reports.** Running the six files standalone
-prints 86 instead, because `test_precio_mayorista.py` is a *single* function asserting over its 23 cards.
-Both numbers are right and they measure different things — don't "correct" one against the other. Both
-were measured on 2026-08-30, after `test_propiedades_corrida.py` was archived; the earlier pair (73 / 95
-over seven files) counted it, and 9 of those 73 were asserting nothing because its run had been deleted.
+**64 es el conteo de funciones `test_`, que es lo que reporta pytest.** Correr los seis archivos por separado
+imprime 86, porque `test_precio_mayorista.py` es *una sola* función que afirma sobre sus 23 fichas. Los dos
+números están bien y miden cosas distintas — no "corrijas" uno contra el otro. Los dos se midieron el
+2026-08-30, después de archivar `test_propiedades_corrida.py`; el par anterior (73 / 95 sobre siete archivos)
+lo contaba, y 9 de esos 73 no afirmaban nada porque su corrida había sido borrada.
 
-They test the **pure** functions and the wiring around them. That is a real first step and it is not the
-whole of it: nothing there touches the network, so a green suite says the rules are intact, not that the
-run works. **Complement it — never replace it — with a small live run:** `--catalogo 60 --por-categoria 2
---muestra 10 --auditoria 0`, then read the console output, `filas.csv` and `run.json` inside the run's own
-folder under `data/makro_plazavea/`. Check the process exit code — it is meaningful (see "Budget
-exhaustion is a global failure"). v23 is why the order matters in both directions: the 53 tests of v22
-were green and its first live run died in the audit loop on a `KeyError`, because the phase was covered
-and its initialisation was not.
+Prueban las funciones **puras** y el cableado alrededor de ellas. Eso es un primer paso real y no es todo:
+nada de ahí toca la red, así que una suite verde dice que las reglas están intactas, no que la corrida
+funciona. **Complementala —nunca la reemplaces— con una corrida viva chica:** `--catalogo 60 --por-categoria 2
+--muestra 10 --auditoria 0`, y después leé la salida de consola, `filas.csv` y `run.json` dentro de la carpeta
+propia de la corrida bajo `data/makro_plazavea/`. Revisá el código de salida del proceso — es significativo
+(ver "el agotamiento del presupuesto es una falla global"). v23 es la razón por la que el orden importa en las
+dos direcciones: los 53 tests de v22 estaban verdes y su primera corrida viva murió en el loop de auditoría con
+un `KeyError`, porque la fase estaba cubierta y su inicialización no.
 
-For a change that touches extraction rules, the sharper test is the acceptance criterion of
-`docs/historia/decisiones_1.1.0.md` §10: re-measure the 20 SKUs of `golden_v5.csv` with `--skus` and diff against
-the fixture, applying that section's three exclusion groups. It closed at 40/40 on 2026-08-21. A pure
-function can be tested without the network at all — that is why the rules live in pure functions.
+Para un cambio que toca reglas de extracción, la prueba más filosa es el criterio de aceptación de
+`docs/historia/decisiones_1.1.0.md` §10: volver a medir los 20 SKUs de `golden_v5.csv` con `--skus` y difear
+contra el fixture, aplicando los tres grupos de exclusión de esa sección. Cerró en 40/40 el 2026-08-21. Una
+función pura se puede probar sin red en absoluto — por eso las reglas viven en funciones puras.
 
-**Expect 38/40 today, not 40/40, and that is correct.** The golden was produced by probe v5 under the
-pre-v18 formula, so its wholesale columns are stale exactly where `price != list_price` — measured, 2 of
-the 40 rows. §10 now names those two rows and adds them as a fourth exclusion group; read it there rather
-than re-deriving which they are. A diff outside them is a real regression. The golden is **not**
-regenerated: a baseline rewritten every time the rules change stops being a baseline.
+**Esperá 38/40 hoy, no 40/40, y eso es correcto.** El golden lo produjo la sonda v5 bajo la fórmula previa a
+v18, así que sus columnas mayoristas están desactualizadas exactamente donde `price != list_price` — medido, 2
+de las 40 filas. §10 ahora nombra esas dos filas y las agrega como cuarto grupo de exclusión; leelo ahí en vez
+de volver a deducir cuáles son. Una diferencia fuera de ellas es una regresión real. El golden **no** se
+regenera: una línea base que se reescribe cada vez que cambian las reglas deja de ser una línea base.
 
-## Versioning convention — read before editing
+## Convención de versionado — leer antes de editar
 
-**Never edit the engine in place under the same identity, and never let two versions produce output under
-the same name.** This isn't style — it's a documented incident: an old copy of the script (`... (1).py`
-from a browser download) was run for hours and the dataset came out silently tagged with the wrong
-taxonomy.
+**Nunca edites el motor en el lugar bajo la misma identidad, y nunca dejes que dos versiones produzcan salida
+bajo el mismo nombre.** Esto no es estilo — es un incidente documentado: se corrió durante horas una copia
+vieja del script (`... (1).py`, de una descarga del navegador) y el dataset salió etiquetado en silencio con la
+taxonomía equivocada.
 
-Three defenses exist and must stay intact when bumping versions:
-1. The version lives in the **filename** so two versions can't collide on disk. *(No longer literally true
-   since the move to `src/`: the collector has one stable path, `makro_plazavea.py`, so defenses 2 and 3
-   carry the whole load and must not be weakened.)*
-2. `VERSION` and the file's own name are printed in the run header (`archivo_script`).
-3. Both are written into the run manifest (`run.json`, inside the run's own folder), so every dataset
-   traces back to the exact script.
+Existen tres defensas y tienen que quedar intactas al subir de versión:
+1. La versión vive en el **nombre del archivo**, así dos versiones no pueden chocar en disco. *(Ya no es
+   literalmente cierto desde la mudanza a `src/`: el colector tiene una única ruta estable,
+   `makro_plazavea.py`, así que las defensas 2 y 3 cargan con todo el peso y no se pueden debilitar.)*
+2. `VERSION` y el nombre del propio archivo se imprimen en el encabezado de la corrida (`archivo_script`).
+3. Los dos se escriben en el manifiesto de la corrida (`run.json`, dentro de la carpeta propia de la corrida),
+   así cada dataset se puede rastrear hasta el script exacto.
 
-When bumping: update `VERSION` (`YYYY.MM.DD-NN`) and prepend a changelog
-entry to `CAMBIOS` describing what changed. Bump `SCHEMA_VERSION` only if you add/remove/rename a `Fila`
-field — it's written into every row so a CSV from six months ago can say what rules it was born under.
-The chronology, because the interesting bump is the one that added nothing: v13 and v14 deliberately
-kept it at `"3"` because no field changed; v15 raised it to `"4"` when the 22 wholesale columns landed
-(56 → 78); **v18 raised it to `"5"` without adding a single column**, because `precio_mayorista` changed
-meaning (`price − descuento` → `list_price − descuento`) and a series holding rows from both eras would
-average two different definitions; v20 raised it to `"6"` with `price_origin` (78 → 79); **v24 raised it to `"7"` with the header
-byte-identical again**, because `descuento_monto` / `precio_mayorista` carried a card-teaser discount
-until v23 and carry the bi-price one from v24 on — same column, two populations. Today: `"7"`,
-79 columns. So a change of *meaning* counts as a schema change even when the header is byte-identical —
-that is the case people forget, and v18 is the precedent. Since each run now writes its own file, a
-schema change no longer
-risks corrupting an existing one — but `schema_version` is still what tells a consolidation layer which
-runs it may safely `UNION`.
-If an older engine file is ever kept next to the current collector, do not delete it — it documents
-provenance for past CSV rows. (The tree holds only `makro_plazavea.py` today.)
+Al subir de versión: actualizá `VERSION` (`YYYY.MM.DD-NN`) y antepone una entrada de changelog a `CAMBIOS`
+describiendo qué cambió. Subí `SCHEMA_VERSION` solo si agregás, sacás o renombrás un campo de `Fila` — se
+escribe en cada fila para que un CSV de hace seis meses pueda decir bajo qué reglas nació. La cronología,
+porque el salto interesante es el que no agregó nada: v13 y v14 lo dejaron deliberadamente en `"3"` porque
+ningún campo cambió; v15 lo subió a `"4"` cuando llegaron las 22 columnas mayoristas (56 → 78); **v18 lo subió
+a `"5"` sin agregar una sola columna**, porque `precio_mayorista` cambió de significado (`price − descuento` →
+`list_price − descuento`) y una serie que tuviera filas de las dos épocas promediaría dos definiciones
+distintas; v20 lo subió a `"6"` con `price_origin` (78 → 79); **v24 lo subió a `"7"` con la cabecera otra vez
+idéntica byte a byte**, porque `descuento_monto` / `precio_mayorista` llevaban un descuento de teaser de
+tarjeta hasta v23 y llevan el del bi-precio desde v24 — misma columna, dos poblaciones. Hoy: `"7"`, 79
+columnas. Así que un cambio de *significado* cuenta como cambio de esquema aunque la cabecera sea idéntica byte
+a byte — ése es el caso que la gente olvida, y v18 es el precedente. Como ahora cada corrida escribe su propio
+archivo, un cambio de esquema ya no arriesga corromper uno existente — pero `schema_version` sigue siendo lo
+que le dice a una capa de consolidación qué corridas puede unir con `UNION` sin riesgo.
+Si alguna vez se guarda un archivo de motor viejo al lado del colector actual, no lo borres — documenta la
+procedencia de filas de CSV pasadas. (Hoy el árbol solo tiene `makro_plazavea.py`.)
 
-## Guiding principle: identify the branch, don't assume it
+## Principio rector: identificar la sucursal, no suponerla
 
-`Producto + precio + disponibilidad + firma logística + nodo` — never `Producto + precio -> guess the branch`.
+`Producto + precio + disponibilidad + firma logística + nodo` — nunca `Producto + precio -> adivinar la sucursal`.
 
-The branch is never inferred from the postal code that was *sent*. It is *identified* by reading VTEX's
-returned logistics signature (`warehouseId` + `dockId` + `courierId` + `courierName`) and matching it
-against the known signatures in `NODOS` (`identificar_nodo`). If VTEX resolves a different node, the row
-says so via `node_resolved` / `logistics_status` (e.g. `MISMATCH_RESOLVED_360`) instead of silently
-mislabeling data. `polygonName` is excluded from the match (`Nodo.firma_core()`) because VTEX versions it
-(`_V2`, `-V2`) without meaning the branch changed — drift is recorded separately as `polygon_drift`.
+La sucursal nunca se infiere del código postal que se *envió*. Se *identifica* leyendo la firma logística que
+devuelve VTEX (`warehouseId` + `dockId` + `courierId` + `courierName`) y contrastándola contra las firmas
+conocidas de `NODOS` (`identificar_nodo`). Si VTEX resuelve un nodo distinto, la fila lo dice vía
+`node_resolved` / `logistics_status` (por ejemplo `MISMATCH_RESOLVED_360`) en vez de etiquetar mal los datos en
+silencio. `polygonName` queda excluido del contraste (`Nodo.firma_core()`) porque VTEX lo versiona (`_V2`,
+`-V2`) sin que eso signifique que la sucursal cambió — la deriva se registra aparte como `polygon_drift`.
 
-`identificar_nodo` loops over every entry in `NODOS` and returns whichever signature matches — a *search*,
-not a lookup keyed by what you sent. That's what makes 2 → 20 branches free: the loop, the measurement
-loop, and the manifest's per-branch tallies all iterate `NODOS`. Since 1.1.0 the output is one long CSV
-keyed `(run_id, node_id, sku_id)`, so a new branch adds *values to a column* rather than a file
-(`docs/historia/decisiones_1.1.0.md` §8) — cheaper still. To add a branch: add one entry (address, coordinates,
-the four logistics identifiers, `seller_chain`, `archivo`). Nothing else changes — but read "Scaling to
-20+ branches" before trusting it.
+`identificar_nodo` recorre todas las entradas de `NODOS` y devuelve la firma que coincida — una *búsqueda*, no
+un lookup indexado por lo que enviaste. Eso es lo que hace que 2 → 20 sucursales salga gratis: el loop, el loop
+de medición y los conteos por sucursal del manifiesto iteran todos sobre `NODOS`. Desde 1.1.0 la salida es un
+único CSV largo con clave `(run_id, node_id, sku_id)`, así que una sucursal nueva agrega *valores a una
+columna* en vez de un archivo (`docs/historia/decisiones_1.1.0.md` §8) — más barato todavía. Para agregar una
+sucursal: agregá una entrada (dirección, coordenadas, los cuatro identificadores logísticos, `seller_chain`,
+`archivo`). Nada más cambia — pero leé "Escalar a 20+ sucursales" antes de confiar en eso.
 
-`Nodo.archivo` is the one leftover: it named that branch's CSV in 1.0.0 and the engine no longer reads it.
-It stays because it is how a `makro_359_santa_anita.csv` from the old history can still be traced to its
-node.
+`Nodo.archivo` es el único resto: nombraba el CSV de esa sucursal en 1.0.0 y el motor ya no lo lee. Se queda
+porque es la forma de rastrear un `makro_359_santa_anita.csv` de la historia vieja hasta su nodo.
 
-## Guiding principle: finding the warehouse is not confirming the dispatch
+## Principio rector: encontrar el almacén no es confirmar el despacho
 
-VTEX can offer several SLAs for the same item. That one comes from the expected warehouse does **not** mean
-it's the one the customer would receive — `selectedSla` says that. Through v08 the script took the first
-SLA whose warehouse matched and called it `MATCH`, which over-interpreted the evidence.
+VTEX puede ofrecer varias SLAs para el mismo ítem. Que una venga del almacén esperado **no** significa que sea
+la que el cliente recibiría — eso lo dice `selectedSla`. Hasta v08 el script tomaba la primera SLA cuyo almacén
+coincidiera y la llamaba `MATCH`, lo que sobreinterpretaba la evidencia.
 
-`fulfillment_confirmed` (`SI`/`NO`) is therefore separate from finding the right warehouse:
-- explicit VTEX selection, or the single unambiguous SLA when only one exists → confirmed
-- multiple SLAs offered and VTEX didn't pick → **not** confirmed, even if the warehouse matches
+Por eso `fulfillment_confirmed` (`SI`/`NO`) va separado de encontrar el almacén correcto:
+- selección explícita de VTEX, o la única SLA inequívoca cuando hay una sola → confirmado
+- varias SLAs ofrecidas y VTEX no eligió → **no** confirmado, aunque el almacén coincida
 
-When the warehouse matches but dispatch isn't confirmed: `logistics_status = MATCH_SIN_CONFIRMAR` and
-`price_status = QUALIFIED` — neither `VERIFIED` nor `UNVERIFIED`. Don't collapse this into `MATCH` for
-convenience; an ambiguous case must stay ambiguous in the data.
+Cuando el almacén coincide pero el despacho no está confirmado: `logistics_status = MATCH_SIN_CONFIRMAR` y
+`price_status = QUALIFIED` — ni `VERIFIED` ni `UNVERIFIED`. No colapses esto en `MATCH` por comodidad; un caso
+ambiguo tiene que quedar ambiguo en los datos.
 
-## Guiding principle: price is never discarded
+## Principio rector: el precio nunca se descarta
 
-If VTEX returned a price, it is written to the CSV — even if logistics validation failed. Three columns,
-deliberately separate:
+Si VTEX devolvió un precio, se escribe al CSV — aunque la validación logística haya fallado. Tres columnas,
+deliberadamente separadas:
 
-- `price` — the **fact** (what VTEX answered)
-- `price_origin` — the **provenance** (`MEDIDO` / `LISTA_SIN_PROMO`)
-- `price_status` — the **judgment** (`VERIFIED` / `VERIFIED_SELLER_RAIZ` / `QUALIFIED` / `UNVERIFIED` / `NO_PRICE`)
-- `logistics_status` — the **why** (`MATCH`, `MATCH_SELLER_RAIZ`, `MATCH_SIN_CONFIRMAR`, `SIN_STOCK`,
+- `price` — el **hecho** (qué contestó VTEX)
+- `price_origin` — la **procedencia** (`MEDIDO` / `LISTA_SIN_PROMO`)
+- `price_status` — el **juicio** (`VERIFIED` / `VERIFIED_SELLER_RAIZ` / `QUALIFIED` / `UNVERIFIED` / `NO_PRICE`)
+- `logistics_status` — el **porqué** (`MATCH`, `MATCH_SELLER_RAIZ`, `MATCH_SIN_CONFIRMAR`, `SIN_STOCK`,
   `NO_COVERAGE`, `OPERADOR_EXTERNO`, `MISMATCH_RESOLVED_*`, `HTTP_ERROR`, `EXCEPTION`, ...)
 
-`price_origin` arrived in v20 and is the newest of the four. **VTEX does not evaluate promotions when the
-node has no stock — it returns the list price**, and the engine used to write that number into `price` with
-no way to tell it apart from a quoted one. Measured: all 143 `withoutStock` rows of `run_20260822_020027`
-have `price == list_price` and `discount_pct = 0.00`, against 19.8% promo incidence among in-stock rows.
-The consequences run deeper than one column, and all three are load-bearing:
+`price_origin` llegó en v20 y es la más nueva de las cuatro. **VTEX no evalúa promociones cuando el nodo no
+tiene stock — devuelve el precio de lista**, y el motor solía escribir ese número en `price` sin forma de
+distinguirlo de uno cotizado. Medido: las 143 filas `withoutStock` de `run_20260822_020027` tienen todas
+`price == list_price` y `discount_pct = 0.00`, contra un 19.8% de incidencia de promo entre las filas con
+stock. Las consecuencias van más hondo que una columna, y las tres son estructurales:
 
-- `discount_pct` goes **empty** under `LISTA_SIN_PROMO`. `0.00` there claims "this product has no discount"
-  about a promotion nobody evaluated. With stock, `0.00` is a genuine measurement and must survive — the
-  same cell means two different things depending on the origin, which is why the origin is a parameter of
-  `calcular_descuento_pct` and not something it can infer from the numbers.
-- The wholesale step's publication rule (`list_price − descuento >= price` → suppressed) becomes
-  **unevaluable**: with `price == list_price` it is satisfied by arithmetic construction, so 82 of 82
-  in-stock-less rows would have been marked published without measuring anything. The price is still
-  computed (`list_price` is catalog data, the discount comes from the teaser — neither depends on stock);
-  what is withheld is the verdict. That is `BIPRECIO_PUBLICACION_INDETERMINADA`.
-- `clasificar_origen_precio` keys on `availability`, **never** on the `price`/`list_price` relation.
-  `price == list_price` also happens to in-stock rows with no promotion; the stock is the cause and the
-  price equality is its consequence, and a consequence cannot be the criterion.
+- `discount_pct` queda **vacía** bajo `LISTA_SIN_PROMO`. Un `0.00` ahí afirma "este producto no tiene
+  descuento" sobre una promoción que nadie evaluó. Con stock, `0.00` es una medición genuina y tiene que
+  sobrevivir — la misma celda significa dos cosas distintas según el origen, y por eso el origen es un
+  parámetro de `calcular_descuento_pct` y no algo que pueda inferir de los números.
+- La regla de publicación del escalón mayorista (`list_price − descuento >= price` → suprimido) se vuelve
+  **inevaluable**: con `price == list_price` se cumple por construcción aritmética, así que 82 de 82 filas sin
+  stock habrían quedado marcadas como publicadas sin haber medido nada. El precio igual se calcula
+  (`list_price` es dato de catálogo, el descuento sale del teaser — ninguno depende del stock); lo que se
+  retiene es el veredicto. Eso es `BIPRECIO_PUBLICACION_INDETERMINADA`.
+- `clasificar_origen_precio` se apoya en `availability`, **nunca** en la relación `price`/`list_price`.
+  `price == list_price` también le pasa a filas con stock sin promoción; el stock es la causa y la igualdad de
+  precios es su consecuencia, y una consecuencia no puede ser el criterio.
 
-A row with `price_status=UNVERIFIED` is real signal (that SKU has no coverage from that branch), not noise
-to filter at extraction time. `medir()` and `construir_fila()` never raise on a per-SKU problem — a failed
-measurement becomes a `Fila` with an `error` field, so one bad SKU can't kill a run. Do not "clean this up"
-with early returns that skip writing a row.
+Una fila con `price_status=UNVERIFIED` es señal real (ese SKU no tiene cobertura desde esa sucursal), no ruido
+para filtrar en el momento de la extracción. `medir()` y `construir_fila()` nunca lanzan excepción por un
+problema de un SKU — una medición fallida se vuelve una `Fila` con campo `error`, así un SKU malo no puede
+matar una corrida. No "limpies esto" con returns tempranos que salteen escribir una fila.
 
-## Guiding principle: budget exhaustion is a global failure, not a bad SKU (v12/v13)
+## Principio rector: el agotamiento del presupuesto es una falla global, no un SKU malo (v12/v13)
 
-This is the newest and most easily broken rule. `TopeAgotadoError` (with `TopeAgotadoAlEntrarError` /
-`TopeAgotadoEnReintentoError`) is a **run-level** condition, not a SKU-level one. It must never be caught
-by the per-SKU `except` in `medir()` and turned into an `EXCEPTION`/`NO_PRICE` row — that disguised a dead
-run as a run full of unavailable products. When it fires, measurement stops, what was already measured is
-kept, and the *pending* measurements are listed in `manifiesto.medicion` (no invented rows).
+Ésta es la regla más nueva y la que más fácil se rompe. `TopeAgotadoError` (con `TopeAgotadoAlEntrarError` /
+`TopeAgotadoEnReintentoError`) es una condición **a nivel de corrida**, no a nivel de SKU. Nunca la puede
+atrapar el `except` por SKU de `medir()` y convertirla en una fila `EXCEPTION`/`NO_PRICE` — eso disfrazaba una
+corrida muerta de corrida llena de productos no disponibles. Cuando se dispara, la medición se detiene, lo que
+ya se midió se conserva, y las mediciones *pendientes* quedan listadas en `manifiesto.medicion` (sin filas
+inventadas).
 
-The consequences are encoded, not narrated:
-- `evaluar_corrida()` decides `corrida_completa`, `motivos_fallo_global`, and the **process exit code**.
-- A *deliberate* discovery limit (`--catalogo`, `--por-categoria`, `--presupuesto-descubrimiento`) is not a
-  failure — exit **0**, with `descubrimiento.clasificacion` saying the catalog was partial on purpose
-  (`LIMITE_POR_CATEGORIA`, `LIMITE_PRESUPUESTO_DESCUBRIMIENTO`).
-- Measurement or chain-stock cut short by budget → `medicion.completa=false` / `stock_cadena.completo=false`
-  → exit **1**. The run delivered less than the selection promised, and nobody asked for that.
-- Missing Playwright → exit **2**; Ctrl-C → exit **130**.
+Las consecuencias están codificadas, no narradas:
+- `evaluar_corrida()` decide `corrida_completa`, `motivos_fallo_global` y el **código de salida del proceso**.
+- Un límite de descubrimiento *deliberado* (`--catalogo`, `--por-categoria`, `--presupuesto-descubrimiento`) no
+  es una falla — sale **0**, con `descubrimiento.clasificacion` diciendo que el catálogo quedó parcial a
+  propósito (`LIMITE_POR_CATEGORIA`, `LIMITE_PRESUPUESTO_DESCUBRIMIENTO`).
+- Medición o stock de cadena cortados por presupuesto → `medicion.completa=false` /
+  `stock_cadena.completo=false` → sale **1**. La corrida entregó menos de lo que prometía la selección, y nadie
+  pidió eso.
+- Playwright ausente → sale **2**; Ctrl-C → sale **130**.
 
-Also from v13: a per-node early alarm fires if a node accumulates 5+ measurements with no
-`MATCH`/`MATCH_SELLER_RAIZ`/`MATCH_SIN_CONFIRMAR`, so a badly loaded `NODOS` signature can't burn a whole
-run producing only `OPERADOR_EXTERNO` in silence.
+También de v13: se dispara una alarma temprana por nodo si un nodo acumula 5 o más mediciones sin ningún
+`MATCH`/`MATCH_SELLER_RAIZ`/`MATCH_SIN_CONFIRMAR`, así una firma de `NODOS` mal cargada no puede quemar una
+corrida entera produciendo solo `OPERADOR_EXTERNO` en silencio.
 
-## Guiding principle: no input files — the catalog is discovered every run (v11)
+## Principio rector: sin archivos de entrada — el catálogo se descubre en cada corrida (v11)
 
-The engine reads **nothing** to decide what to measure. `panel.json` (a frozen basket on disk, v01–v10) is
-gone. It solved a real problem — random sampling means two runs share no SKUs and there's no time series —
-but it was a crutch of the *sampling*, and it brought its own bug: chain stock came from that old photo and
-looked live (0 of 100 SKUs changed between runs). Any field read from the panel is the past disguised as
-the present.
+El motor **no lee nada** para decidir qué medir. `panel.json` (una canasta congelada en disco, v01–v10) ya no
+está. Resolvía un problema real —muestreo aleatorio significa que dos corridas no comparten ningún SKU y no hay
+serie temporal— pero era una muleta del *muestreo*, y traía su propio bug: el stock de cadena salía de esa foto
+vieja y parecía en vivo (0 de 100 SKUs cambiaron entre corridas). Cualquier campo leído del panel es el pasado
+disfrazado de presente.
 
-Reproducibility now comes from a deterministic hash instead of a file (`seleccionar`):
+La reproducibilidad ahora sale de un hash determinista en vez de un archivo (`seleccionar`):
 
 ```
 orden = md5(f"{semilla}:{sku_id}")   ->  take the first N
 ```
 
-Same seed + same catalog = same sample, nothing persisted; and new Makro products enter the draw on their
-own. **Every file the engine writes is output. None is read back to decide what to measure.** Don't
-reintroduce an input file to "stabilize" the sample.
+Misma semilla + mismo catálogo = misma muestra, sin persistir nada; y los productos nuevos de Makro entran al
+sorteo solos. **Todo archivo que el motor escribe es salida. Ninguno se vuelve a leer para decidir qué medir.**
+No reintroduzcas un archivo de entrada para "estabilizar" la muestra.
 
-## Guiding principle: scope is chosen, not inherited from the tree (v17)
+## Principio rector: el alcance se elige, no se hereda del árbol (v17)
 
-The category tree has **3,401 nodes**, and `descubrir_catalogo` walks them in a fixed order —
-by route — stopping when `--catalogo N` is reached. The fixed order is deliberate and must stay:
-it is what makes discovery reproducible without persisting anything.
+El árbol de categorías tiene **3.401 nodos**, y `descubrir_catalogo` los recorre en un orden fijo —por ruta—
+deteniéndose cuando se alcanza `--catalogo N`. El orden fijo es deliberado y tiene que quedarse: es lo que hace
+que el descubrimiento sea reproducible sin persistir nada.
 
-But it had a consequence nobody chose. A bounded run always measured the *first* categories of the
-tree — Packs Limpieza, Packs Desayunos, Packs Vinos — and abarrotes could never come up at all.
-So `--catalogo 300` never meant "300 SKUs of the catalog"; it meant "the first 300 that happen to
-appear", a sample biased by an accidental property of how VTEX sorts its own tree. The scope of
-the series was being decided by the tree, not by the analyst. That is what `--categoria` fixes.
+Pero traía una consecuencia que nadie eligió. Una corrida acotada siempre medía las *primeras* categorías del
+árbol —Packs Limpieza, Packs Desayunos, Packs Vinos— y abarrotes no podía aparecer nunca. Así que
+`--catalogo 300` nunca significó "300 SKUs del catálogo"; significaba "los primeros 300 que aparezcan", una
+muestra sesgada por una propiedad accidental de cómo VTEX ordena su propio árbol. El alcance de la serie lo
+estaba decidiendo el árbol, no el analista. Eso es lo que arregla `--categoria`.
 
-`--categoria "/399/,/77/"` restricts the universe before anything is walked. Three things about it
-are load-bearing:
+`--categoria "/399/,/77/"` restringe el universo antes de recorrer nada. Tres cosas de este flag son
+estructurales:
 
-- **The filter runs before the traversal, not after.** This is not an optimisation, it is whether
-  the flag works at all: discarding a category *after* paginating it costs one request per category
-  thrown away — 3,300 categories at `--intervalo 1.5` is ~83 minutes spent to produce nothing.
-  Measured on `/399/` (Limpieza): 47 categories walked, **3,353 skipped without a single request**.
-- **Prefix match by segment, never `startswith` on the string.** Asking for `/39/` must not drag in
-  `399`, which is a different branch entirely. Matching whole segments is also what makes asking for
-  a parent include its children, which is the useful behaviour.
-- **A route that isn't in the tree is an argument error (exit 2), not a warning.** A run that
-  measures zero categories because someone typed `/3999/` would otherwise finish with exit 0 and an
-  empty CSV — indistinguishable from a branch that genuinely ran out of stock. All bad routes are
-  reported together, so someone who passed four and mistyped two doesn't discover it one at a time.
-  The check needs the live tree, so it happens inside discovery rather than in `parsear_argumentos`.
+- **El filtro corre antes del recorrido, no después.** Esto no es una optimización, es si el flag funciona o
+  no: descartar una categoría *después* de paginarla cuesta un request por cada categoría tirada — 3.300
+  categorías a `--intervalo 1.5` son unos 83 minutos gastados para no producir nada. Medido sobre `/399/`
+  (Limpieza): 47 categorías recorridas, **3.353 salteadas sin un solo request**.
+- **Coincidencia de prefijo por segmento, nunca `startswith` sobre el string.** Pedir `/39/` no puede arrastrar
+  `399`, que es otra rama completamente distinta. Contrastar segmentos enteros es además lo que hace que pedir
+  un padre incluya a sus hijos, que es el comportamiento útil.
+- **Una ruta que no está en el árbol es un error de argumento (salida 2), no una advertencia.** Una corrida que
+  mide cero categorías porque alguien tipeó `/3999/` terminaría si no con salida 0 y un CSV vacío —
+  indistinguible de una sucursal que genuinamente se quedó sin stock. Todas las rutas malas se reportan juntas,
+  así quien pasó cuatro y tipeó mal dos no se entera de a una. La verificación necesita el árbol vivo, así que
+  ocurre dentro del descubrimiento y no en `parsear_argumentos`.
 
-`--categoria` is incompatible with `--skus`: that flag already names exactly what to measure, so
-accepting a filter that changes nothing would imply one was applied. It composes freely with
-`--catalogo` and `--por-categoria`, which keep operating *inside* the restricted universe.
+`--categoria` es incompatible con `--skus`: ese flag ya nombra exactamente qué medir, así que aceptar un filtro
+que no cambia nada implicaría que se aplicó alguno. Se compone libremente con `--catalogo` y `--por-categoria`,
+que siguen operando *dentro* del universo restringido.
 
-### What `completo` means once scope is restricted
+### Qué significa `completo` cuando el alcance está restringido
 
-This is the part that can quietly corrupt a conclusion. A filtered run that walks everything it was
-asked to walk is complete — but complete *with respect to the request*, not with respect to Makro's
-catalog. Reading one as the other would let a series built on a single branch be reported later as
-category coverage.
+Ésta es la parte que puede corromper una conclusión en silencio. Una corrida filtrada que recorre todo lo que
+se le pidió recorrer está completa — pero completa *respecto del pedido*, no respecto del catálogo de Makro.
+Leer una cosa como la otra permitiría que una serie construida sobre una sola rama se reporte después como
+cobertura de categoría.
 
-So the manifest separates the two:
+Por eso el manifiesto separa las dos:
 
-- `descubrimiento.alcance` — `CATALOGO_COMPLETO` or `CATEGORIAS_SELECCIONADAS`.
-- `descubrimiento.clasificacion` — `COMPLETO` only for an unfiltered full walk;
-  **`COMPLETO_EN_CATEGORIAS`** when the requested branches were exhausted. Same nothing-is-missing
-  guarantee, different universe, and the name says which.
-- `categoria_filtro`, `categorias_seleccionadas`, `categorias_a_recorrer` — without these the scope
-  of an old run can't be reconstructed: two runs with the same SKU count may have looked at
-  different branches.
+- `descubrimiento.alcance` — `CATALOGO_COMPLETO` o `CATEGORIAS_SELECCIONADAS`.
+- `descubrimiento.clasificacion` — `COMPLETO` solo para un recorrido completo sin filtrar;
+  **`COMPLETO_EN_CATEGORIAS`** cuando se agotaron las ramas pedidas. La misma garantía de que no falta nada,
+  otro universo, y el nombre dice cuál.
+- `categoria_filtro`, `categorias_seleccionadas`, `categorias_a_recorrer` — sin esto no se puede reconstruir el
+  alcance de una corrida vieja: dos corridas con la misma cantidad de SKUs pueden haber mirado ramas distintas.
 
-`--por-categoria` keeps its older, stronger contract on top of all this: with it set, discovery can
-**never** be marked complete, filtered or not. That flag's promise is "wide sample", and no amount
-of scope restriction turns a sample into a census.
+`--por-categoria` mantiene su contrato más viejo y más fuerte por encima de todo esto: con ese flag puesto, el
+descubrimiento **nunca** se puede marcar completo, filtrado o no. La promesa de ese flag es "muestra ancha", y
+ninguna restricción de alcance convierte una muestra en un censo.
 
-## Guiding principle: two kinds of stock answer two different questions
+## Principio rector: dos clases de stock responden dos preguntas distintas
 
-`availability` comes from checkout **with the branch's address** ("can this store ship it today?").
-`chain_stock` comes from the catalog **without branch context** ("how much is left anywhere in the chain?").
-They are refreshed independently (`refrescar_stock_cadena`, a handful of batched `fq=productId:` requests,
-not one per SKU) and are not supposed to agree.
+`availability` sale del checkout **con la dirección de la sucursal** ("¿esta tienda lo puede despachar hoy?").
+`chain_stock` sale del catálogo **sin contexto de sucursal** ("¿cuánto queda en cualquier parte de la
+cadena?"). Se refrescan de forma independiente (`refrescar_stock_cadena`, un puñado de requests `fq=productId:`
+en lote, no uno por SKU) y no se supone que coincidan.
 
-`calcular_stock_signal` crosses them into one actionable label:
-- `DISPONIBLE` — the branch has it
-- `SIN_STOCK_LOCAL_CADENA_CON_STOCK` — branch is out, chain has it — **the row that's worth money**: real
-  demand, visible stockout, competitor-comparable
-- `SIN_STOCK_CADENA` — out everywhere
-- `SIN_STOCK_LOCAL_CADENA_DESCONOCIDA` — branch is out, chain status unknown
+`calcular_stock_signal` los cruza en una sola etiqueta accionable:
+- `DISPONIBLE` — la sucursal lo tiene
+- `SIN_STOCK_LOCAL_CADENA_CON_STOCK` — la sucursal no lo tiene, la cadena sí — **la fila que vale plata**:
+  demanda real, quiebre visible, comparable contra la competencia
+- `SIN_STOCK_CADENA` — no queda en ninguna parte
+- `SIN_STOCK_LOCAL_CADENA_DESCONOCIDA` — la sucursal no lo tiene, el estado de la cadena se desconoce
 
-These were `QUIEBRE_LOCAL` / `QUIEBRE_CADENA` / `QUIEBRE_LOCAL_CADENA_DESCONOCIDA` until v20. "Quiebre"
-asserts a *temporary* stockout of something the branch normally carries, and that is not what a single
-day's measurement can distinguish from the SKU simply not being in that branch's assortment — one of the
-143 was checked by hand (SKU 11566889), not 143. The new names state what was observed and leave the cause
-unasserted; the series settles it on its own, and that inference belongs to the analyst with 30 days of
-time axis in front of them, not to a cell.
+Éstos eran `QUIEBRE_LOCAL` / `QUIEBRE_CADENA` / `QUIEBRE_LOCAL_CADENA_DESCONOCIDA` hasta v20. "Quiebre" afirma
+un faltante *temporal* de algo que la sucursal normalmente tiene, y eso no es lo que la medición de un solo día
+puede distinguir de que el SKU simplemente no esté en el surtido de esa sucursal — de las 143 se revisó una a
+mano (SKU 11566889), no 143. Los nombres nuevos declaran lo que se observó y dejan la causa sin afirmar; la
+serie lo resuelve sola, y esa inferencia le pertenece al analista que tiene 30 días de eje temporal enfrente,
+no a una celda.
 
-## `surtido_makro` does not answer the assortment question (measured 2026-08-25)
+## `surtido_makro` no responde la pregunta de surtido (medido 2026-08-25)
 
-The column claims to be "the ONLY proof of Makro assortment for THIS branch"
-(`docs/historia/decisiones_1.1.0.md` §2). It is not. Measured across both runs on disk, it is **collinear with
-`availability` in every single row**:
+La columna afirma ser "la ÚNICA prueba de surtido Makro para ESTA sucursal"
+(`docs/historia/decisiones_1.1.0.md` §2). No lo es. Medido sobre las dos corridas que hay en disco, es
+**colineal con `availability` en cada una de las filas**:
 
-| run | `SI` / `available` | `NO` / `withoutStock` | exceptions |
+| corrida | `SI` / `available` | `NO` / `withoutStock` | excepciones |
 |---|---|---|---|
 | `run_20260822_020027` | 3031 | 143 | **0** |
 | `run_20260824_154502` | 3029 | 143 | **0** |
 
-It is equally collinear with `logistics_status` (`MATCH` / `SIN_STOCK`) and with `fulfillment_type`
-(`tienda` / empty). Four columns, one fact.
+Es igual de colineal con `logistics_status` (`MATCH` / `SIN_STOCK`) y con `fulfillment_type` (`tienda` /
+vacío). Cuatro columnas, un solo hecho.
 
-**The mechanism — and it is not the one you would guess.** `seller_chain` does not come back *empty*
-when there is no stock; it **collapses to the root seller**:
+**El mecanismo — y no es el que uno adivinaría.** `seller_chain` no vuelve *vacía* cuando no hay stock; se
+**colapsa al seller raíz**:
 
 ```
 surtido_makro = SI  ->  seller_chain = "1 > plazaveamko359" (1520) / "1 > plazaveamko360" (1511)
 surtido_makro = NO  ->  seller_chain = "1"                  (143)
 ```
 
-The rule is `"SI" if f"plazaveamko{node_id}" in seller_chain else "NO"`. VTEX only appends the branch
-seller once it has resolved a seller that will actually ship, and that requires stock. So the column
-does not ask "is this SKU part of this branch's assortment?" — it asks **"did VTEX resolve this branch
-as a seller today?"**, which is true if and only if there is stock.
+La regla es `"SI" if f"plazaveamko{node_id}" in seller_chain else "NO"`. VTEX solo agrega el seller de la
+sucursal una vez que resolvió un seller que efectivamente va a despachar, y eso requiere stock. Así que la
+columna no pregunta "¿este SKU es parte del surtido de esta sucursal?" — pregunta **"¿VTEX resolvió hoy esta
+sucursal como seller?"**, que es verdadero si y solo si hay stock.
 
-**It is collinear, not an alias, and the difference is load-bearing.** A row with stock shipped by the
-root seller or a third party (`MATCH_SELLER_RAIZ`, `OPERADOR_EXTERNO`, dropship) would come back
-`availability = available` with `surtido_makro = NO`. In abarrotes across nodes 359 and 360 that has
-never happened: both runs contain only `MATCH` and `SIN_STOCK` — zero `MATCH_SELLER_RAIZ`, zero
-`OPERADOR_EXTERNO`. The redundancy is a property of *this* sample, not of the definition. Anyone
-"simplifying" the column by pointing it at another field would be fixing the wrong thing.
+**Es colineal, no un alias, y la diferencia es estructural.** Una fila con stock despachada por el seller raíz
+o por un tercero (`MATCH_SELLER_RAIZ`, `OPERADOR_EXTERNO`, dropship) volvería con `availability = available` y
+`surtido_makro = NO`. En abarrotes, sobre los nodos 359 y 360, eso no pasó nunca: las dos corridas contienen
+solo `MATCH` y `SIN_STOCK` — cero `MATCH_SELLER_RAIZ`, cero `OPERADOR_EXTERNO`. La redundancia es una propiedad
+de *esta* muestra, no de la definición. Quien "simplifique" la columna apuntándola a otro campo estaría
+arreglando la cosa equivocada.
 
-**It does not get deleted today (§6.5, §6.6).** §6.6 says a column that looks useless is measured for 30
-days before being removed, and one category on two nodes is exactly the thin evidence that rule exists
-to override. §6.5 makes the same argument about this exact case, three years early: `seller_id` stays
-because *"if a marketplace third party shows up it will carry another value"* — which is precisely the
-row that would break the collinearity. **Revisit at 30 days, or when the scope expands past abarrotes to
-another category.** Until then the column stays, redundant and documented.
+**Hoy no se borra (§6.5, §6.6).** §6.6 dice que una columna que parece inútil se mide durante 30 días antes de
+sacarla, y una categoría sobre dos nodos es exactamente la evidencia delgada que esa regla existe para anular.
+§6.5 hace el mismo argumento sobre este mismo caso, tres años antes: `seller_id` se queda porque *"si aparece
+un tercero de marketplace va a llevar otro valor"* — que es precisamente la fila que rompería la colinealidad.
+**Revisar a los 30 días, o cuando el alcance se expanda de abarrotes a otra categoría.** Hasta entonces la
+columna se queda, redundante y documentada.
 
-**The question it was supposed to answer is still open.** "Does this SKU belong to this node's
-assortment?" is answered by **no column in the schema today**, and it will not be answered by a cell.
-Answering it properly means querying the catalog under branch context — a new per-branch request phase,
-which is the cost that scales worst of everything here when 2 branches become 20. The time axis answers
-it for free: a SKU that never appears with stock at a node across 30 days is, with high probability, not
-in that node's assortment. Same reasoning that made v20 rename `QUIEBRE_LOCAL` — the cause is settled by
-the series, not asserted by a cell, and that inference belongs to the analyst.
+**La pregunta que se suponía que respondía sigue abierta.** "¿Este SKU pertenece al surtido de este nodo?" hoy
+no la responde **ninguna columna del esquema**, y no la va a responder una celda. Responderla bien significa
+consultar el catálogo bajo contexto de sucursal — una fase de requests nueva por sucursal, que es el costo que
+peor escala de todo lo que hay acá cuando 2 sucursales se vuelven 20. El eje temporal la responde gratis: un
+SKU que a lo largo de 30 días nunca aparece con stock en un nodo, con alta probabilidad no está en el surtido
+de ese nodo. El mismo razonamiento que llevó a v20 a renombrar `QUIEBRE_LOCAL` — la causa la resuelve la serie,
+no la afirma una celda, y esa inferencia le pertenece al analista.
 
-## Guiding principle: evidence is cheap insurance, verify instead of trusting
+## Principio rector: la evidencia es un seguro barato, verificar en vez de confiar
 
-Three separate parser bugs (`all_headers` vs `headers`, a destructive fallback, a `sellerChain` that wrongly
-discarded valid nodes) each cost re-scraped history. Two defenses now exist:
+Tres bugs de parseo distintos (`all_headers` en vez de `headers`, un fallback destructivo, y un `sellerChain`
+que descartaba nodos válidos por error) costaron cada uno volver a scrapear historia. Hoy existen dos defensas:
 
-- **Raw evidence** (`guardar_evidencia`) — every response is archived, compressed, to
-  `raw.jsonl.gz` inside the run's own folder, next to the rows it explains (headers/cookies excluded on
-  purpose — session tokens never touch disk). A parser fix can be replayed against the archive with zero new requests.
-- **Sampled reconciliation** (`--auditoria`, default 5%) — that share of measurements is fetched *both* ways
-  and diffed (`reconciliar`) on price, availability, warehouse and seller chain. `simulation` is trusted by
-  default because it's 1 request instead of 3; this is what keeps verifying that trust without paying 3x.
+- **Evidencia cruda** (`guardar_evidencia`) — cada respuesta se archiva, comprimida, en `raw.jsonl.gz` dentro
+  de la carpeta propia de la corrida, al lado de las filas que explica (headers y cookies excluidos a propósito
+  — los tokens de sesión nunca tocan el disco). Un arreglo de parseo se puede reproducir contra el archivo con
+  cero requests nuevos.
+- **Reconciliación muestreada** (`--auditoria`, 5% por defecto) — esa proporción de mediciones se pide de las
+  *dos* formas y se difea (`reconciliar`) sobre precio, disponibilidad, almacén y cadena de sellers. Se confía
+  en `simulation` por defecto porque es 1 request en vez de 3; esto es lo que sigue verificando esa confianza
+  sin pagar 3x.
 
-Disable them (`--sin-evidencia`, `--auditoria 0`) only for throwaway test runs.
+Desactivalas (`--sin-evidencia`, `--auditoria 0`) solo para corridas de prueba descartables.
 
-## Guiding principle: a schema change must never silently corrupt history
+## Principio rector: un cambio de esquema no debe corromper la historia
 
-`COLUMNAS = list(Fila().__dict__.keys())`, so adding a field auto-adds a CSV column. Through 1.0.0 that was
-dangerous, because the CSV was *appended* to: an old header silently received wider rows and misaligned every
-downstream read. A guard (`archivar_si_cambio_el_esquema`) renamed the old file before that could happen.
+`COLUMNAS = list(Fila().__dict__.keys())`, así que agregar un campo agrega automáticamente una columna al CSV.
+Hasta 1.0.0 eso era peligroso, porque al CSV se le hacía *append*: una cabecera vieja recibía en silencio filas
+más anchas y desalineaba toda lectura aguas abajo. Una guarda (`archivar_si_cambio_el_esquema`) renombraba el
+archivo viejo antes de que eso pudiera pasar.
 
-1.1.0 removed the guard, and it is worth knowing why so nobody misses it. With one immutable folder per run,
-every run writes its own `filas.csv` with its own header and never reopens it — two schemas can no longer
-share a file, so there is nothing left to misalign. What the guard protected is now carried by
-`schema_version`, written into every row.
+1.1.0 sacó la guarda, y vale saber por qué para que nadie la extrañe. Con una carpeta inmutable por corrida,
+cada corrida escribe su propio `filas.csv` con su propia cabecera y nunca lo vuelve a abrir — dos esquemas ya
+no pueden compartir un archivo, así que no queda nada que desalinear. Lo que protegía la guarda ahora lo carga
+`schema_version`, escrito en cada fila.
 
-The risk did not disappear, it moved: a glob across `run_*/filas.csv` can still pull together runs with
-different headers. That is the consolidation layer's job, and `schema_version` is what it decides with.
-Don't hand-edit a header to make a mismatch go away.
+El riesgo no desapareció, se mudó: un glob sobre `run_*/filas.csv` todavía puede juntar corridas con cabeceras
+distintas. Ése es el trabajo de la capa de consolidación, y `schema_version` es con lo que decide. No edites
+una cabecera a mano para hacer desaparecer un desajuste.
 
-## Guiding principle: the wholesale price is reconstructed, not observed
+## Principio rector: el precio mayorista se reconstruye, no se observa
 
-1.1.0's reason for existing is the bi-precio: Makro discounts a SKU past a declared threshold
-(`CantidadBiPrecioMK`), and that is the number a pricing analyst actually negotiates against. The mechanism,
-the mechanism and the 22 columns are specified in `docs/historia/decisiones_1.1.0.md` §1 and §5 — read there, don't
-restate them here. **One exception, and it is the formula itself:** §1 and §5 still carry the pre-v18
-`precio_mayorista = price − descuento`, which v18 measured wrong (11/23 against the storefront cards). The
-current formula is `list_price − descuento` and it lives in `calcular_mayorista`, with the correction
-recorded in `docs/historia/brief_correccion_mayorista.md` and the `[Sin publicar]` section of `CHANGELOG.md`. §1 is
-right about everything else — the threshold's source, the single step, the teaser, the detector.
+La razón de existir de 1.1.0 es el bi-precio: Makro descuenta un SKU al pasar un umbral declarado
+(`CantidadBiPrecioMK`), y ése es el número contra el que un analista de pricing realmente negocia. El
+mecanismo y las 22 columnas están especificados en `docs/historia/decisiones_1.1.0.md` §1 y §5 — leelos ahí, no
+los repitas acá. **Una excepción, y es la fórmula misma:** §1 y §5 todavía llevan la versión previa a v18,
+`precio_mayorista = price − descuento`, que v18 midió equivocada (11/23 contra las fichas del storefront). La
+fórmula actual es `list_price − descuento` y vive en `calcular_mayorista`, con la corrección registrada en
+`docs/historia/brief_correccion_mayorista.md` y en la sección `[Sin publicar]` de `CHANGELOG.md`. §1 tiene
+razón en todo lo demás — la fuente del umbral, el escalón único, el teaser, el detector.
 
-What belongs here is the epistemics, because it is easy to get wrong twice:
+Lo que corresponde acá es la epistemología, porque es fácil equivocarse dos veces:
 
-- The **threshold** exists only in the catalog response; the **discount** appears in both catalog and
-  `simulation`. Neither source is sufficient alone, so `Producto` carries the catalog-only fields from
-  discovery into measurement. That is *not* a return of the `panel.json` input file — nothing is read from
-  disk; it is one run's catalog answer travelling in memory to that same run's measurement.
-- The engine measures at `qty=1`, and at `qty=1` the discount is not applied. So `precio_mayorista` is
-  **reconstructed by subtraction**, not observed. `--auditoria-mayorista` is the only thing that observes it:
-  it re-measures a few rows at `qty = bi_umbral` and compares. Rows it touched say
-  `precio_mayorista_verificado = SI`; every other row says `NO`, and `NO` is the honest default, not a gap.
-- When the measured price disagrees with the reconstructed one, the **measured** value wins (it is what the
-  customer pays), the row is flagged `DQ_MAYORISTA_DISCREPA`, and `descuento_monto` is left untouched —
-  the disagreement between what VTEX *declared* and what it *charges* is the finding, so erasing either side
-  would erase it.
-- **It has fired exactly once, and the audit was the side that was wrong.** SKU 10012680 in
-  `run_20260822_020027`, threshold 3: VTEX charged 88.00 — exactly its own `price`, against a `list_price`
-  of 118.50. Nothing disagreed. The unit promotion simply beat the declared step, and the audit was
-  comparing against an expectation that didn't apply. Read a `DQ_MAYORISTA_DISCREPA` as *"one of these two
-  sides is wrong"*, never as *"VTEX is wrong"* — the flag names a contradiction, not a culprit.
-- **There are two expectations at `qty = bi_umbral`, not one, and that is the whole content of
-  `BIPRECIO_SUPERADO_POR_PROMO`.** When `list_price − descuento >= price`, the declared step is worse than
-  the promotion already running at `qty=1`, so it is neither published nor charged, and the price to expect
-  is `price` itself — not the reconstruction. That state therefore *predicts a number*, which is what makes
-  it auditable, and until v22 it was the only bi-price assertion nothing verified.
-  `BIPRECIO_PUBLICACION_INDETERMINADA` is excluded from the audit for the mirror-image reason: with no stock
-  VTEX quotes no quantity at all, so there is nothing to compare and counting it would manufacture
-  agreement out of silence. The states themselves are `docs/historia/decisiones_1.1.0.md` §5's to define (its enum
-  is annotated there as superseded); what belongs here is the rule that produced them — a status that
-  predicts a price must be audited, and one that predicts nothing must never be scored as a pass.
-- **The threshold range verified under the *current* formula is narrower than §11 reads.** §11's 12 / 15 /
-  24 evidence was measured on 2026-08-21 and 2026-08-22 under the pre-v18 base, and a passing audit of a
-  superseded formula does not transfer to its replacement. Since v18 the audits on disk cover thresholds
-  **2, 3, 4 and 20**, against a catalog that declares 2, 3, 4, 6, 10, 12, 13, 15 and 20 — so 6, 10, 12, 13
-  and 15 are unverified today. Cite §11 as the record of what was checked *then*.
-- The audit samples for **threshold coverage**, not representativeness — one low, the highest available,
-  then unseen thresholds — and since v22 it also stratifies by unit promotion, which is the axis where the
-  formula actually broke. Three audits of the same threshold prove the formula for that threshold only.
+- El **umbral** existe solo en la respuesta del catálogo; el **descuento** aparece tanto en el catálogo como en
+  `simulation`. Ninguna fuente alcanza sola, así que `Producto` transporta los campos que solo están en el
+  catálogo desde el descubrimiento hasta la medición. Eso *no* es un regreso del archivo de entrada
+  `panel.json` — no se lee nada del disco; es la respuesta de catálogo de una corrida viajando en memoria hasta
+  la medición de esa misma corrida.
+- El motor mide a `qty=1`, y a `qty=1` el descuento no se aplica. Así que `precio_mayorista` está
+  **reconstruido por resta**, no observado. `--auditoria-mayorista` es lo único que lo observa: vuelve a medir
+  unas pocas filas a `qty = bi_umbral` y compara. Las filas que tocó dicen `precio_mayorista_verificado = SI`;
+  todas las demás dicen `NO`, y `NO` es la respuesta honesta por defecto, no un hueco.
+- Cuando el precio medido no coincide con el reconstruido, gana el valor **medido** (es lo que paga el
+  cliente), la fila se marca con `DQ_MAYORISTA_DISCREPA`, y `descuento_monto` se deja intacto — el desacuerdo
+  entre lo que VTEX *declaró* y lo que *cobra* es el hallazgo, así que borrar cualquiera de los dos lados lo
+  borraría.
+- **Se disparó exactamente una vez, y el lado equivocado fue la auditoría.** SKU 10012680 en
+  `run_20260822_020027`, umbral 3: VTEX cobró 88.00 — exactamente su propio `price`, contra un `list_price` de
+  118.50. No había desacuerdo. La promoción unitaria simplemente le ganó al escalón declarado, y la auditoría
+  estaba comparando contra una expectativa que no aplicaba. Leé un `DQ_MAYORISTA_DISCREPA` como *"uno de estos
+  dos lados está mal"*, nunca como *"VTEX está mal"* — la bandera nombra una contradicción, no un culpable.
+- **Hay dos expectativas a `qty = bi_umbral`, no una, y eso es todo el contenido de
+  `BIPRECIO_SUPERADO_POR_PROMO`.** Cuando `list_price − descuento >= price`, el escalón declarado es peor que
+  la promoción que ya corre a `qty=1`, así que no se publica ni se cobra, y el precio a esperar es `price`
+  mismo — no la reconstrucción. Ese estado, entonces, *predice un número*, que es lo que lo hace auditable, y
+  hasta v22 era la única afirmación del bi-precio que nada verificaba.
+  `BIPRECIO_PUBLICACION_INDETERMINADA` queda excluido de la auditoría por la razón espejo: sin stock VTEX no
+  cotiza ninguna cantidad, así que no hay nada que comparar y contarlo fabricaría coincidencia a partir del
+  silencio. Definir los estados en sí le corresponde a `docs/historia/decisiones_1.1.0.md` §5 (su enum está
+  anotado ahí como superado); lo que corresponde acá es la regla que los produjo — un estado que predice un
+  precio tiene que ser auditado, y uno que no predice nada nunca se puede contar como acierto.
+- **El rango de umbrales verificado bajo la fórmula *actual* es más angosto de lo que se lee en §11.** La
+  evidencia 12 / 15 / 24 de §11 se midió el 2026-08-21 y el 2026-08-22 bajo la base previa a v18, y una
+  auditoría aprobada de una fórmula superada no se transfiere a su reemplazo. Desde v18 las auditorías que hay
+  en disco cubren los umbrales **2, 3, 4 y 20**, contra un catálogo que declara 2, 3, 4, 6, 10, 12, 13, 15 y
+  20 — así que 6, 10, 12, 13 y 15 están hoy sin verificar. Citá §11 como el registro de lo que se verificó
+  *entonces*.
+- La auditoría muestrea por **cobertura de umbrales**, no por representatividad —uno bajo, el más alto
+  disponible, después los umbrales no vistos— y desde v22 además estratifica por promoción unitaria, que es el
+  eje donde la fórmula realmente se rompió. Tres auditorías del mismo umbral prueban la fórmula solo para ese
+  umbral.
 
-## Architecture (`src/retail_engine/collectors/makro_plazavea.py`, single file, top to bottom)
+## Arquitectura (`src/retail_engine/collectors/makro_plazavea.py`, un solo archivo, de arriba abajo)
 
-1. **Version block + `CAMBIOS`** — `VERSION`, `SCHEMA_VERSION`, and the per-version changelog described above.
-2. **Constants + output paths** — `MOTOR = "makro_plazavea"` names the output namespace so future
-   collectors can't collide. The collector is named by **source**, not by retailer: `makro_pe` would be
-   the same retailer through a different storefront and must not share a folder. `RETAILER` travels
-   *inside* every row. `raiz_repo()` finds the repo by marker (`pyproject.toml`) instead of counting
-   parents — before 1.1.0 the output root resolved *inside* the installable package. `carpeta_corrida()`
-   is the single function that builds output paths; if you find a `SALIDA / "algo"` anywhere else, it's
-   a bug.
-3. **`Nodo` / `NODOS`** — branch signature catalog; `firma_core()` and `direccion()`.
-4. **`Producto` / `Fila`** — `Producto` is a catalog entry; `Fila` is one measurement (SKU × branch ×
-   moment) and its fields are the CSV schema. Every row carries `run_id`, `schema_version`, `retailer`, and
+1. **Bloque de versión + `CAMBIOS`** — `VERSION`, `SCHEMA_VERSION`, y el changelog por versión descrito arriba.
+2. **Constantes + rutas de salida** — `MOTOR = "makro_plazavea"` nombra el namespace de salida para que
+   colectores futuros no puedan chocar. El colector se nombra por **fuente**, no por minorista: `makro_pe`
+   sería el mismo minorista a través de otro storefront y no debe compartir carpeta. `RETAILER` viaja *dentro*
+   de cada fila. `raiz_repo()` encuentra el repo por marcador (`pyproject.toml`) en vez de contar padres —
+   antes de 1.1.0 la raíz de salida se resolvía *adentro* del paquete instalable. `carpeta_corrida()` es la
+   única función que arma rutas de salida; si encontrás un `SALIDA / "algo"` en cualquier otro lado, es un bug.
+3. **`Nodo` / `NODOS`** — catálogo de firmas de sucursal; `firma_core()` y `direccion()`.
+4. **`Producto` / `Fila`** — `Producto` es una entrada de catálogo; `Fila` es una medición (SKU × sucursal ×
+   momento) y sus campos son el esquema del CSV. Cada fila lleva `run_id`, `schema_version`, `retailer` y
    `dq_flags`.
-5. **`Cliente`** — polite wrapper over Playwright's async `APIRequestContext` (*not* `page`): minimum
-   interval between requests, exponential backoff on 429/5xx, honors `Retry-After`, hard request cap
-   enforced **per attempt** (v12), request counters broken down by phase. Note the comment about
-   `APIResponse.headers` being a *property*, not a coroutine. Bugs in `ERRORES_DE_CODIGO`
-   (`AttributeError`, `TypeError`, ...) are deliberately **not** retried.
-6. **Discovery** (`total_desde_resources`, `aplanar_categorias`, `parsear_producto`, `descubrir_catalogo`,
-   `es_basura`, `es_landing_seo`) — walks the VTEX category tree building each category's full path,
-   paginates by page length when the `resources` header is unparseable (v12), and caps SEO landing pages
-   (lowercase names like "absolut vodka") at 1 SKU so they don't flood the sample with one product's variants.
-   The full path `aplanar_categorias` already builds is what makes `--categoria` a prefix match rather than
-   a tree re-walk: `filtrar_categorias`, `ruta_bajo` and `normalizar_ruta_categoria` are pure and testable
-   without the network, and the filter is applied to that flat list *before* the loop (see "scope is chosen,
-   not inherited from the tree").
-7. **Selection** — `seleccionar` is the deterministic hash sampling described above; persists nothing.
-   `descubrir_por_skus` is the `--skus` path: it resolves an explicit list with batched `fq=skuId:`
-   (20 SKUs in 2 requests) and returns three lists, because "asked and the catalog said no"
-   (`SKU_NO_ENCONTRADO`, gets a row) is not "never asked, the budget ran out" (gets no row).
-8. **Evidence & audit** (`guardar_evidencia`, `reconciliar`) and **chain stock** (`refrescar_stock_cadena`,
-   `calcular_stock_signal`).
-9. **Response parsing** (`extraer_logistica`, `evaluar_calidad`, `extraer_item`, `extraer_direccion`,
-   `clasificar_fulfillment`, `identificar_nodo`) — `clasificar_fulfillment` distinguishes *who actually
-   ships* (`tienda`, `tienda_raiz`, `proveedor`/dropship, `generico_pv`, `operador_externo`,
-   `desconocido`), since the storefront also sells non-Makro inventory. `operador_externo` arrived in
-   1.1.0 for a real case (`STK917NF` / `DCK-NF-MK-917` / `DD-NF-CD-917-URBANO`): the origin was fully
-   identified and simply wasn't Makro. Calling that `desconocido` invited treating a firm fact about
-   assortment as missing data, so `desconocido` is now reserved for *actually missing* logistics.
-   `evaluar_calidad` runs four targeted rules (`DQ_SKU_DISTINTO`, `DQ_PRECIO_MAYOR`, `DQ_PRECIO_CERO`,
-   `DQ_UNIDAD_INCONSISTENTE`) that have each caught a real bad row — kept small on purpose. A fifth,
-   `DQ_MAYORISTA_DISCREPA`, is set by the wholesale audit rather than by `evaluar_calidad`.
+5. **`Cliente`** — envoltorio educado sobre el `APIRequestContext` asíncrono de Playwright (*no* `page`):
+   intervalo mínimo entre requests, backoff exponencial ante 429/5xx, respeta `Retry-After`, tope duro de
+   requests aplicado **por intento** (v12), contadores de requests desglosados por fase. Ojo con el comentario
+   sobre `APIResponse.headers`, que es una *property*, no una corrutina. Los bugs de `ERRORES_DE_CODIGO`
+   (`AttributeError`, `TypeError`, ...) deliberadamente **no** se reintentan.
+6. **Descubrimiento** (`total_desde_resources`, `aplanar_categorias`, `parsear_producto`,
+   `descubrir_catalogo`, `es_basura`, `es_landing_seo`) — recorre el árbol de categorías de VTEX armando la
+   ruta completa de cada categoría, pagina por longitud de página cuando el header `resources` no se puede
+   parsear (v12), y limita las landings SEO (nombres en minúscula como "absolut vodka") a 1 SKU para que no
+   inunden la muestra con las variantes de un solo producto. La ruta completa que `aplanar_categorias` ya arma
+   es lo que hace que `--categoria` sea una coincidencia de prefijo y no un nuevo recorrido del árbol:
+   `filtrar_categorias`, `ruta_bajo` y `normalizar_ruta_categoria` son puras y testeables sin red, y el filtro
+   se aplica a esa lista plana *antes* del loop (ver "el alcance se elige, no se hereda del árbol").
+7. **Selección** — `seleccionar` es el muestreo determinista por hash descrito arriba; no persiste nada.
+   `descubrir_por_skus` es el camino de `--skus`: resuelve una lista explícita con `fq=skuId:` en lote (20 SKUs
+   en 2 requests) y devuelve tres listas, porque "se preguntó y el catálogo dijo que no"
+   (`SKU_NO_ENCONTRADO`, que sí obtiene una fila) no es "nunca se preguntó, se acabó el presupuesto" (que no
+   obtiene fila).
+8. **Evidencia y auditoría** (`guardar_evidencia`, `reconciliar`) y **stock de cadena**
+   (`refrescar_stock_cadena`, `calcular_stock_signal`).
+9. **Parseo de respuestas** (`extraer_logistica`, `evaluar_calidad`, `extraer_item`, `extraer_direccion`,
+   `clasificar_fulfillment`, `identificar_nodo`) — `clasificar_fulfillment` distingue *quién despacha
+   realmente* (`tienda`, `tienda_raiz`, `proveedor`/dropship, `generico_pv`, `operador_externo`,
+   `desconocido`), porque el storefront también vende inventario que no es de Makro. `operador_externo` llegó
+   en 1.1.0 por un caso real (`STK917NF` / `DCK-NF-MK-917` / `DD-NF-CD-917-URBANO`): el origen estaba
+   completamente identificado y simplemente no era Makro. Llamar a eso `desconocido` invitaba a tratar un hecho
+   firme sobre el surtido como dato faltante, así que `desconocido` ahora queda reservado para logística
+   *realmente ausente*. `evaluar_calidad` corre cuatro reglas puntuales (`DQ_SKU_DISTINTO`, `DQ_PRECIO_MAYOR`,
+   `DQ_PRECIO_CERO`, `DQ_UNIDAD_INCONSISTENTE`) que cada una atrapó una fila mala real — se mantiene chico a
+   propósito. Una quinta, `DQ_MAYORISTA_DISCREPA`, la pone la auditoría mayorista y no `evaluar_calidad`.
 
-   Also here, all pure: `calcular_mayorista`, `clasificar_ean`, `resolver_presentacion` and the teaser
-   readers (`leer_regimen`, `leer_descuento`). They take JSON or strings and return values — no network,
-   no `Fila` — so they can be tested directly, and `enriquecer_fila` is deliberately thin glue over them.
-10. **Measurement** (`consultar_simulation`, `consultar_orderform`, `_orderform_con_cliente`,
-    `construir_fila`, `medir`) — `simulation` is 1 stateless request; `orderform` is the 3-request flow and
-    the only one returning a backend-resolved address, so since v10 it gets **its own browser context** (the
-    cart is state and was contaminating measurements). Default mode falls back to orderform per-SKU only when
-    simulation returned no logistics *and* availability wasn't already a definitive
-    `cannotBeDelivered`/`withoutStock`, and never overwrites a simulation price with an empty orderform result.
-11. **Output** (`escribir_filas`, `registrar_corrida`, `evaluar_corrida`, `escribir_manifiesto`) — one
-    immutable folder per run, one long CSV inside it. The time-series property is no longer "append to a
-    file" but "accumulate folders": reading the whole history is a glob over `run_*/filas.csv`. **Never
-    overwrite a past run's folder.** The manifest records script/schema version, run ID, requests per
-    phase, per-branch tallies, `descubrimiento` / `medicion` / `stock_cadena` completeness blocks,
-    `seleccion` (including `modo_seleccion` and, for `--skus`, which SKUs were absent versus never asked
-    about), `auditoria_mayorista`, and `resumen.corrida_completa` + `motivos_fallo_global`.
-12. **`main()`** — CLI parsing, browser lifecycle, per-run global state reset (`MEDICION`,
-    `STOCK_CADENA_ESTADO`, `ALARMA_FIRMA_DISPARADA` — they're module globals so `escribir_manifiesto` can
-    read them; keep them cleared per run so a second call in one process starts clean), a warning if pre-v11
-    CSVs are still sitting in the old flat output root (it never moves them), auto request-cap sizing, and the
-    final `evaluar_corrida` verdict + exit code.
+   También acá, todas puras: `calcular_mayorista`, `clasificar_ean`, `resolver_presentacion` y los lectores del
+   teaser (`leer_regimen`, `leer_descuento`). Toman JSON o strings y devuelven valores — sin red, sin `Fila` —
+   así que se pueden testear directo, y `enriquecer_fila` es deliberadamente un pegamento delgado sobre ellas.
+10. **Medición** (`consultar_simulation`, `consultar_orderform`, `_orderform_con_cliente`, `construir_fila`,
+    `medir`) — `simulation` es 1 request sin estado; `orderform` es el flujo de 3 requests y el único que
+    devuelve una dirección resuelta por el backend, así que desde v10 tiene **su propio contexto de navegador**
+    (el carrito es estado y estaba contaminando las mediciones). El modo por defecto cae a orderform por SKU
+    solo cuando simulation no devolvió logística *y* la disponibilidad no era ya un `cannotBeDelivered` /
+    `withoutStock` definitivo, y nunca pisa un precio de simulation con un resultado vacío de orderform.
+11. **Salida** (`escribir_filas`, `registrar_corrida`, `evaluar_corrida`, `escribir_manifiesto`) — una carpeta
+    inmutable por corrida, un CSV largo adentro. La propiedad de serie temporal ya no es "hacerle append a un
+    archivo" sino "acumular carpetas": leer toda la historia es un glob sobre `run_*/filas.csv`. **Nunca pises
+    la carpeta de una corrida pasada.** El manifiesto registra la versión de script y de esquema, el ID de la
+    corrida, los requests por fase, los conteos por sucursal, los bloques de completitud `descubrimiento` /
+    `medicion` / `stock_cadena`, `seleccion` (incluyendo `modo_seleccion` y, para `--skus`, qué SKUs estaban
+    ausentes frente a cuáles nunca se preguntaron), `auditoria_mayorista`, y `resumen.corrida_completa` +
+    `motivos_fallo_global`.
+12. **`main()`** — parseo de CLI, ciclo de vida del navegador, reset del estado global por corrida (`MEDICION`,
+    `STOCK_CADENA_ESTADO`, `ALARMA_FIRMA_DISPARADA` — son globales de módulo para que `escribir_manifiesto`
+    pueda leerlos; mantenelos limpiados por corrida así una segunda llamada en el mismo proceso arranca
+    limpia), una advertencia si todavía quedan CSVs previos a v11 en la vieja raíz de salida plana (nunca los
+    mueve), dimensionamiento automático del tope de requests, y el veredicto final de `evaluar_corrida` + el
+    código de salida.
 
-## Scaling to 20+ branches
+## Escalar a 20+ sucursales
 
-More branches, same architecture — most machinery already scales because it iterates `NODOS`:
+Más sucursales, la misma arquitectura — la mayor parte de la maquinaria ya escala porque itera sobre `NODOS`:
 
-- **Free**: `identificar_nodo`'s search loop, the measurement loop, one more `node_id` value inside the
-  single long CSV (`docs/historia/decisiones_1.1.0.md` §8), the manifest's per-branch breakdown, and request-cap
-  auto-sizing.
-- **Grows linearly, needs planning**: requests per run (SKUs × branches, ~×4 worst case) and wall-clock time
-  (requests are strictly sequential at `--intervalo`, by design — "respeto al servidor" in the module
-  docstring). 2 → 20 branches is roughly a 10x run. Size `--muestra` and `--intervalo` accordingly instead of
-  raising `--tope` blindly — and note that `--categoria` is the other lever: at 20 branches, narrowing the
-  universe to the categories that matter commercially beats measuring a wide, shallow slice of everything.
-- **The real risk when onboarding a branch**: a wrong or incomplete `NODOS` entry doesn't error — VTEX simply
-  never returns that signature, every row becomes `node_resolved="OTHER"` / `OPERADOR_EXTERNO`, and the branch
-  looks "covered" in row counts while contributing zero verified prices. The v13 per-node alarm now warns
-  during the run, but still: **before trusting a new branch, run a small `--muestra` against just that node and
-  confirm rows come back `MATCH` / `MATCH_SELLER_RAIZ`.**
-- **Out of scope here**: multi-retailer adapters and a retailer-agnostic domain model (Nivel 3+ of the
-  correctness-before-coverage ladder). Don't start building those abstractions speculatively — the
-  one-namespace-per-collector split is the only concession the engine makes to that future.
+- **Gratis**: el loop de búsqueda de `identificar_nodo`, el loop de medición, un valor más de `node_id` dentro
+  del único CSV largo (`docs/historia/decisiones_1.1.0.md` §8), el desglose por sucursal del manifiesto, y el
+  dimensionamiento automático del tope de requests.
+- **Crece linealmente, hay que planificarlo**: requests por corrida (SKUs × sucursales, ~×4 en el peor caso) y
+  tiempo de reloj (los requests son estrictamente secuenciales a `--intervalo`, por diseño — "respeto al
+  servidor" en el docstring del módulo). 2 → 20 sucursales es aproximadamente una corrida 10x. Dimensioná
+  `--muestra` e `--intervalo` en consecuencia en vez de subir `--tope` a ciegas — y notá que `--categoria` es
+  la otra palanca: a 20 sucursales, angostar el universo a las categorías que importan comercialmente le gana a
+  medir una tajada ancha y superficial de todo.
+- **El riesgo real al incorporar una sucursal**: una entrada de `NODOS` equivocada o incompleta no da error —
+  VTEX simplemente nunca devuelve esa firma, cada fila queda como `node_resolved="OTHER"` /
+  `OPERADOR_EXTERNO`, y la sucursal parece "cubierta" en el conteo de filas mientras aporta cero precios
+  verificados. La alarma por nodo de v13 ahora avisa durante la corrida, pero igual: **antes de confiar en una
+  sucursal nueva, corré una `--muestra` chica contra ese nodo solo y confirmá que las filas vuelven `MATCH` /
+  `MATCH_SELLER_RAIZ`.**
+- **Fuera de alcance acá**: adaptadores multi-minorista y un modelo de dominio agnóstico del minorista
+  (Nivel 3+ de la escalera correctitud-antes-que-cobertura). No empieces a construir esas abstracciones de
+  forma especulativa — la división de un namespace por colector es la única concesión que el motor le hace a
+  ese futuro.
 
-## Output files
+## Archivos de salida
 
-One immutable folder per run, named exactly like the `run_id` (`docs/historia/decisiones_1.1.0.md` §7):
+Una carpeta inmutable por corrida, nombrada exactamente como el `run_id`
+(`docs/historia/decisiones_1.1.0.md` §7):
 
 ```
 data/makro_plazavea/
 ├── run_20260821_201821/
-│   ├── filas.csv          one row per (SKU, branch, run) — long format, node_id is a column
-│   ├── run.json           this run's manifest
-│   └── raw.jsonl.gz       compressed raw VTEX responses
-├── run_20260822_001329/   another run, same day or not
-├── runs.jsonl             append-only index, one flat line per run
-└── last_run.json          copy of the newest manifest, so you don't have to glob
+│   ├── filas.csv          una fila por (SKU, sucursal, corrida) — formato largo, node_id es columna
+│   ├── run.json           el manifiesto de esta corrida
+│   └── raw.jsonl.gz       respuestas crudas de VTEX, comprimidas
+├── run_20260822_001329/   otra corrida, el mismo día o no
+├── runs.jsonl             índice append-only, una línea plana por corrida
+└── last_run.json          copia del manifiesto más nuevo, para no tener que hacer un glob
 ```
 
-- **Fixed names inside, `run_id` only on the folder.** One identifier, impossible to desynchronise.
-- **`YYYYMMDD_HHMMSS`, so alphabetical order is chronological.** Reading the whole history is
+- **Nombres fijos adentro, el `run_id` solo en la carpeta.** Un identificador, imposible de desincronizar.
+- **`YYYYMMDD_HHMMSS`, así el orden alfabético es cronológico.** Leer toda la historia es
   `read_csv('data/makro_plazavea/run_*/filas.csv')`.
-- **Never one CSV per branch.** The node is the column `node_id`, so a 21st branch adds values, not files,
-  and never changes the schema (§8). Measured on `golden_v5.csv`: 24 of the 56 engine columns differ
-  between 359 and 360 for at least one SKU, and only 11 of those are node identity — the wide format gets
-  more expensive with every branch, not less.
-- **`runs.jsonl` is the only append-only thing left**, on purpose: it is an index, not a dataset, and it
-  stays readable with `tail` at a thousand runs.
-- The engine **never writes exports**. Per-branch or per-category slices come from a separate command.
+- **Nunca un CSV por sucursal.** El nodo es la columna `node_id`, así que una sucursal 21 agrega valores, no
+  archivos, y nunca cambia el esquema (§8). Medido sobre `golden_v5.csv`: 24 de las 56 columnas del motor
+  difieren entre 359 y 360 para al menos un SKU, y solo 11 de ésas son identidad del nodo — el formato ancho se
+  vuelve más caro con cada sucursal, no menos.
+- **`runs.jsonl` es lo único append-only que queda**, a propósito: es un índice, no un dataset, y sigue siendo
+  legible con `tail` a las mil corridas.
+- El motor **nunca escribe exports**. Los cortes por sucursal o por categoría salen de un comando aparte.
 
-### Columns that can come back structurally empty
+### Columnas que pueden salir estructuralmente vacías
 
-Five columns are empty in **every** row of every run on disk — measured 2026-08-26 over 9,528 rows across
-the four runs that have a `filas.csv`. All five are declared `str = ""` in `Fila`, so a consolidation
-layer that infers types from a sample will type them float/`NaN` and then compare them against `""` and
-find nothing. Same rule as the monetary fields, applied to the type: **empty means unknown**, and a
-zero — or a `NaN` — never stands in for an unknown.
+Cinco columnas están vacías en **todas** las filas de todas las corridas que hay en disco — medido el
+2026-08-26 sobre 9.528 filas de las cuatro corridas que tienen un `filas.csv`. Las cinco están declaradas
+`str = ""` en `Fila`, así que una capa de consolidación que infiera tipos a partir de una muestra las va a
+tipar como float/`NaN` y después las va a comparar contra `""` sin encontrar nada. La misma regla que para los
+campos monetarios, aplicada al tipo: **vacío significa desconocido**, y un cero —o un `NaN`— nunca reemplaza a
+un desconocido.
 
-| column | fills when |
+| columna | se llena cuando |
 |---|---|
-| `postal_resolved` | the row came from an **orderForm** response (`--modo orderform`, or the per-SKU fallback). `simulation` returns no `shippingData` at all, so the default mode never fills it. |
-| `neighborhood_resolved` | same source, same condition. |
-| `sla_selected` | VTEX marks a `selectedSla` — which `simulation` never does *by design*, not out of ambiguity. That is exactly why a single SLA counts as confirmed; see "finding the warehouse is not confirming the dispatch". |
-| `polygon_drift` | the returned `polygonName` differs from the one recorded in `NODOS` for that node. |
-| `error` | HTTP ≥ 400, a `__error` inside a 200 body, or a per-SKU exception. All four runs had none of the three, which is the good outcome, not a gap. |
+| `postal_resolved` | la fila vino de una respuesta de **orderForm** (`--modo orderform`, o el fallback por SKU). `simulation` no devuelve ningún `shippingData`, así que el modo por defecto nunca la llena. |
+| `neighborhood_resolved` | misma fuente, misma condición. |
+| `sla_selected` | VTEX marca un `selectedSla` — cosa que `simulation` nunca hace *por diseño*, no por ambigüedad. Ésa es exactamente la razón por la que una SLA única cuenta como confirmada; ver "encontrar el almacén no es confirmar el despacho". |
+| `polygon_drift` | el `polygonName` devuelto difiere del que está registrado en `NODOS` para ese nodo. |
+| `error` | HTTP ≥ 400, un `__error` dentro de un cuerpo 200, o una excepción por SKU. Las cuatro corridas no tuvieron ninguna de las tres, que es el buen resultado, no un hueco. |
 
-**None of the five is a dead code path.** The address pair and `error` are reachable from the orderForm
-and failure paths; `--auditoria`'s orderForm responses do carry a populated `shippingData.address`, read
-for reconciliation and then discarded, so the value exists and simply isn't the row's. `docs/historia/decisiones_1.1.0.md`
-§11 already carries the fill rate of `postal_resolved` / `neighborhood_resolved` as a 30-day open question.
+**Ninguna de las cinco es código muerto.** El par de dirección y `error` son alcanzables desde el camino de
+orderForm y desde los caminos de falla; las respuestas de orderForm de `--auditoria` sí llevan un
+`shippingData.address` poblado, que se lee para la reconciliación y después se descarta, así que el valor
+existe y simplemente no es el de la fila. `docs/historia/decisiones_1.1.0.md` §11 ya registra la tasa de
+llenado de `postal_resolved` / `neighborhood_resolved` como una pregunta abierta a 30 días.
 
-**`dq_flags` is not one of them, and it is the trap.** It carries `DQ_MAYORISTA_DISCREPA` in exactly one
-row of `run_20260822_020027` — non-empty 1 time in 9,528. A single run will show it 100% empty and a
-sampler will almost certainly agree; both are wrong. Type it from `Fila`, never from a sample.
+**`dq_flags` no es una de ellas, y es la trampa.** Lleva `DQ_MAYORISTA_DISCREPA` en exactamente una fila de
+`run_20260822_020027` — no vacía 1 vez sobre 9.528. Una sola corrida la va a mostrar 100% vacía y un muestreo
+casi seguro va a coincidir; los dos están mal. Tipala desde `Fila`, nunca desde una muestra.
 
-The analyst does the cross-branch comparison downstream (SQL/pandas over the long CSV) — do not add
-cross-branch comparison logic to this engine, at 2 branches or at 20.
+El analista hace la comparación entre sucursales aguas abajo (SQL/pandas sobre el CSV largo) — no le agregues
+lógica de comparación entre sucursales a este motor, ni a 2 sucursales ni a 20.
 
-## Notes for future sessions
+## Notas para sesiones futuras
 
-- **`docs/` has three floors and the folder name says which.** `docs/columnas.md` sits at the root and is
-  live: it is authoritative on what each cell of `filas.csv` means. `docs/historia/` is the closed record of
-  the 1.1.0 era — still cited, never a roadmap; don't cite section numbers from it as if they were current,
-  and don't act on a brief without checking git first. `docs/bodegueros/` is the new direction and owns
-  nothing about the engine yet.
-- **This file, `docs/columnas.md` and `docs/historia/decisiones_1.1.0.md` are the authoritative context
-  documents in-repo**, each over a different thing: design reasons here, cell meanings in `columnas.md`,
-  the 1.1.0 inventory in `decisiones_1.1.0.md`.
-- `docs/historia/brief_correccion_mayorista.md`, `docs/historia/brief_tareas_bloqueantes.md` and
-  `docs/historia/brief_tres_correcciones.md` are **all three closed**, despite reading as open work orders. Each
-  shipped: the wholesale base in v18 (`a84a3e5`), TAREA B's discovery raw in v19 (`10c0983`) and TAREA A's
-  stockout price in v20, and the truncation / audit / `surtido_makro` trio in `8569056`, `03e2189` and
-  `a2b6775`. They stay because they record what evidence forced each change, and each now opens with a
-  blockquote saying so. Read as pending, they would cause finished work to be redone. Two real open items
-  survive them: `surtido_makro` was measured redundant and deliberately **not** deleted (revisit at 30
-  days, or when scope leaves abarrotes), and thresholds 6, 10, 12, 13 and 15 have no audit under the
-  post-v18 wholesale formula.
-- `CLAUDE.md` is **tracked by git**: every edit lands in the history and in a PR diff. Treat it as source,
-  not as scratch. `.gitignore` covers `.env`, `data/`, `graphify-out/`, `.vscode/` and build artifacts.
-- `graphify-out/` (gitignored) can hold a generated knowledge graph of this repo — useful for orientation
-  when present, but the engine file itself is always the source of truth. It is absent from the tree today.
-- **`test_propiedades_corrida.py` was archived on 2026-08-30, not repaired.** It was pinned to
-  `run_20260822_020027`, deleted from disk, so it skipped itself and reported green while asserting
-  nothing. Rebuilding that coverage against a surviving run (`run_20260826_021034`, the one
-  `docs/columnas.md` is written against) is a *new* test, with its own reasoning about which invariants
-  still hold on a different scope (`--categoria /431/`) — not a re-point of the archived one. See
+- **`docs/` tiene tres pisos y el nombre de la carpeta dice cuál.** `docs/columnas.md` está en la raíz y es
+  vivo: es autoritativo sobre qué significa cada celda de `filas.csv`. `docs/historia/` es el registro cerrado
+  de la era 1.1.0 — todavía se cita, nunca es hoja de ruta; no cites números de sección de ahí como si fueran
+  actuales, y no actúes sobre un brief sin revisar git primero. `docs/bodegueros/` es el rumbo nuevo y todavía
+  no es dueño de nada sobre el motor.
+- **Este archivo, `docs/columnas.md` y `docs/historia/decisiones_1.1.0.md` son los documentos de contexto
+  autoritativos del repo**, cada uno sobre una cosa distinta: las razones de diseño acá, el significado de las
+  celdas en `columnas.md`, el inventario de 1.1.0 en `decisiones_1.1.0.md`.
+- `docs/historia/brief_correccion_mayorista.md`, `docs/historia/brief_tareas_bloqueantes.md` y
+  `docs/historia/brief_tres_correcciones.md` están **los tres cerrados**, aunque se lean como órdenes de
+  trabajo abiertas. Cada uno shipeó: la base mayorista en v18 (`a84a3e5`), el crudo de descubrimiento de la
+  TAREA B en v19 (`10c0983`) y el precio en quiebre de la TAREA A en v20, y el trío truncamiento / auditoría /
+  `surtido_makro` en `8569056`, `03e2189` y `a2b6775`. Se conservan porque registran qué evidencia forzó cada
+  cambio, y cada uno abre ahora con un blockquote que lo dice. Leídos como pendientes, harían rehacer trabajo
+  ya terminado. Dos ítems realmente abiertos les sobreviven: `surtido_makro` se midió redundante y
+  deliberadamente **no** se borró (revisar a los 30 días, o cuando el alcance salga de abarrotes), y los
+  umbrales 6, 10, 12, 13 y 15 no tienen auditoría bajo la fórmula mayorista posterior a v18.
+- `CLAUDE.md` está **trackeado por git**: cada edición entra al historial y al diff de un PR. Tratalo como
+  fuente, no como scratch. `.gitignore` cubre `.env`, `data/`, `graphify-out/`, `.vscode/` y artefactos de
+  build.
+- `graphify-out/` (gitignored) puede contener un grafo de conocimiento generado de este repo — útil para
+  orientarse cuando está, pero el archivo del motor es siempre la fuente de verdad. Hoy no está en el árbol.
+- **`test_propiedades_corrida.py` se archivó el 2026-08-30, no se reparó.** Estaba clavado a
+  `run_20260822_020027`, borrada del disco, así que se salteaba a sí mismo y reportaba verde sin afirmar nada.
+  Reconstruir esa cobertura contra una corrida sobreviviente (`run_20260826_021034`, la corrida contra la que
+  está escrito `docs/columnas.md`) es un test *nuevo*, con su propio razonamiento sobre qué invariantes siguen
+  valiendo bajo otro alcance (`--categoria /431/`) — no un re-apuntado del archivado. Ver
   `tests/historia/regresion_makro_plazavea/LEEME.md`.
-- `docs/historia/decisiones_1.1.0.md` — closed inventory of what 1.1.0 shipped: the bi-price mechanism, the 22
-  columns, known bugs, acceptance criterion and scope. It owns those numbers and definitions; don't restate
-  them here, where the two copies would drift apart. Consult it before proposing changes — but read it as
-  the record of *that* release, not as the current roadmap. **Its superseded parts are annotated in place**
-  (a blockquote at each one): the wholesale formula in §1 and §5, the assortment claim in §2, the 78-column
-  count and the `biprecio_status` enum in §5, and `--categorias` in §12. **§11 is not annotated and should
-  be**: its "resuelta en todo el rango observado (2 a 24)" was measured under the pre-v18 formula, so it
-  records what was verified then, not what is verified now — see "the wholesale price is reconstructed".
-  Its §9 bug table is **not** fully cleared either: the collector-side bugs are fixed, and the probe-side
-  ones (v1/v4 pointing at `mk_scraping_engine_0.1.0.py`, v2/v3 at `v1.py`, the probe renaming) are now moot
-  rather than fixed — those five probes were archived to `tests/historia/sondas_makro_plazavea/` on
-  2026-08-30 and no longer run. If one is ever revived, its bug comes back with it.
-- `docs/historia/contradicciones.md` — the audit behind these corrections, with its `## Resoluciones` section. Read
-  it before re-adding anything this file used to say.
+- `docs/historia/decisiones_1.1.0.md` — inventario cerrado de lo que entregó 1.1.0: la mecánica del bi-precio,
+  las 22 columnas, bugs conocidos, criterio de aceptación y alcance. Es dueño de esos números y definiciones;
+  no los repitas acá, donde las dos copias se separarían con el tiempo. Consultalo antes de proponer cambios —
+  pero leelo como el registro de *esa* versión, no como la hoja de ruta actual. **Sus partes superadas están
+  anotadas en el lugar** (un blockquote en cada una): la fórmula mayorista en §1 y §5, la afirmación sobre
+  surtido en §2, el conteo de 78 columnas y el enum `biprecio_status` en §5, y `--categorias` en §12. **§11 no
+  está anotada y debería estarlo**: su "resuelta en todo el rango observado (2 a 24)" se midió bajo la fórmula
+  previa a v18, así que registra lo que se verificó entonces, no lo que está verificado ahora — ver "el precio
+  mayorista se reconstruye". Su tabla de bugs de §9 tampoco está **del todo** saldada: los bugs del lado del
+  colector están arreglados, y los del lado de las sondas (v1/v4 apuntando a `mk_scraping_engine_0.1.0.py`,
+  v2/v3 a `v1.py`, el renombre de la sonda) hoy son irrelevantes más que arreglados — esas cinco sondas se
+  archivaron en `tests/historia/sondas_makro_plazavea/` el 2026-08-30 y ya no corren. Si alguna vez se revive
+  una, su bug vuelve con ella.
+- `docs/historia/contradicciones.md` — la auditoría detrás de estas correcciones, con su sección
+  `## Resoluciones`. Leelo antes de volver a agregar cualquier cosa que este archivo solía decir.
