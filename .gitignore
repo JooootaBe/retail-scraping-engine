@@ -23,6 +23,9 @@ playwright-report/
 test-results/
 blob-report/
 .mk_capture_profile/
+# La captura de obtener_nodo_logistico_mk.py: sus post_data llevan los
+# identificadores de sesion que el propio storefront embute en el cuerpo.
+ops/captura_mk_shipping.json
 
 # Logs
 *.log

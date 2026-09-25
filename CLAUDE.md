@@ -46,23 +46,37 @@ tests/historia/sondas_makro_plazavea/            cinco sondas exploratorias (v1�
 tests/historia/regresion_makro_plazavea/         test_propiedades_corrida.py — archivado, su corrida ya no está
 tests/fixtures/makro_plazavea/golden_v5.csv      línea base producida por la sonda v5, con su propio README
 tests/fixtures/makro_plazavea/fichas_publicadas_20260822.csv   las 23 fichas capturadas a mano que lee test_precio_mayorista.py
-ops/                                             herramientas operativas — NO el motor; nunca miden precios
+ops/                                             herramientas operativas — NO el motor; nunca miden precios ellas mismas
 ops/arbol_categorias.py                          fotografía el árbol de categorías y lo difea contra el anterior
 ops/obtener_nodo_logistico_mk.py                 captura la firma logística viva de una sucursal (headed, independiente)
-data/                                            salida generada (gitignored, `.gitignore:32`)
+ops/corrida_diaria.sh                            el envoltorio de la corrida diaria — el comando canónico, a mano o por timer
+ops/alerta_fallo.sh                              avisa (escritorio + `logs/fallas.log`) cuando la diaria agotó su reintento
+ops/systemd/                                     las tres unidades de usuario que disparan la diaria a las 02:00
+data/                                            salida generada (gitignored, `.gitignore:35`)
 ```
 
-`ops/` es una frontera deliberada, no una carpeta para sobras. Lo que está ahí corre a mano o por cron, nunca
-modifica el motor y nunca es importado *por* él, y responde una pregunta *sobre* el catálogo o una sucursal en
-vez de extraer precios. Ojo que el contrato es de una sola dirección: una herramienta de ops puede importar el
-motor, pero no está obligada. Hoy viven dos ahí.
+`ops/` es una frontera deliberada, no una carpeta para sobras. Lo que está ahí corre a mano o por timer, nunca
+modifica el motor y nunca es importado *por* él. Ojo que el contrato es de una sola dirección: una herramienta
+de ops puede importar el motor, pero no está obligada.
+
+Hay dos clases adentro, y conviene no confundirlas. Las **herramientas de pregunta** responden algo *sobre* el
+catálogo o una sucursal en vez de extraer precios (`arbol_categorias.py`, `obtener_nodo_logistico_mk.py`) — ésa
+era la definición entera de `ops/` hasta que se automatizó la corrida. Las de **infraestructura de ejecución**
+(`corrida_diaria.sh`, `alerta_fallo.sh`, `systemd/`) no responden ninguna pregunta: deciden *cuándo* y *bajo
+qué entorno* corre el motor. Siguen sin medir precios ellas mismas —invocan al CLI y no lo reimplementan— y por
+eso la regla de oro de la carpeta aguanta: **si un archivo de `ops/` alguna vez parsea una respuesta de VTEX o
+escribe una fila, está en la carpeta equivocada.**
 
 `arbol_categorias.py` sí importa el motor, y existe porque una categoría nueva es una señal comercial —alguien
 del otro lado decidió empezar a vender algo— y hasta ahora entraba al recorrido en silencio.
 `obtener_nodo_logistico_mk.py` no importa nada de `retail_engine` (solo Playwright, headed): captura la firma
 logística real de una sucursal desde un checkout vivo, que es la evidencia que una entrada nueva de `NODOS`
 necesita *antes* de ser confiable — ver "Escalar a 20+ sucursales", donde el costo de una firma equivocada es
-una sucursal que parece cubierta y aporta cero precios verificados.
+una sucursal que parece cubierta y aporta cero precios verificados. Su salida, `ops/captura_mk_shipping.json`,
+está **gitignoreada y tiene que quedarse así**: el `post_data` que la herramienta conserva a propósito —es
+justamente lo que se quería estudiar— trae adentro los identificadores de sesión que el storefront embute en el
+cuerpo (`VtexRCSessionIdv7`, `retailer-visitor-id`), así que el filtro de cabeceras del script no alcanza. El
+motor nunca escribe tokens al disco; una captura de ops sí puede, y por eso no se commitea.
 
 El proyecto existe para construir una serie temporal de precios por SKU y por sucursal, de modo que un analista
 de pricing pueda comparar sucursales después en SQL/pandas. **El extractor mismo nunca compara sucursales y
@@ -113,6 +127,71 @@ estas corridas de la serie. `--dry-run` mide e imprime sin escribir nada, ni siq
 cuando la serie era un solo archivo mutable al que se le hacía append. Con una carpeta inmutable por corrida no
 hay archivo acumulado que reiniciar, y lo único que el flag todavía podría borrar es historia cerrada. Un flag
 cuyo único efecto posible es destruir el pasado no se redefine — se saca.
+
+### La corrida diaria es automática (02:00, timer de systemd de usuario)
+
+Desde el 2026-09-06 la serie no depende de que alguien se acuerde. Un timer de usuario dispara
+`ops/corrida_diaria.sh` todos los días a las 02:00 hora de Lima. Antes de eso las corridas se lanzaban a mano,
+y la serie ya llevaba las dos cicatrices: **el 2026-08-28 no tiene corrida** y `run_20260829_020141` arrancó
+tarde. Las dos son las que la automatización existe para no repetir.
+
+```bash
+systemctl --user list-timers motor-makro.timer   # cuándo dispara la próxima
+systemctl --user status motor-makro.service      # cómo terminó la última
+journalctl --user -u motor-makro -n 100          # su consola
+ops/corrida_diaria.sh                            # la misma corrida, a mano, ahora
+```
+
+El alcance diario (`--categoria "/431/" --auditoria-mayorista 10`) vive en **una sola constante**,
+`ALCANCE_DIARIO` dentro de `corrida_diaria.sh`. Cambiarlo cambia qué universo mide la serie de ahí en adelante,
+así que las corridas viejas y las nuevas dejan de ser comparables sin filtrar por fecha — leé "el alcance se
+elige, no se hereda del árbol" antes de tocarlo. El script sin argumentos usa ese alcance; **con** argumentos
+los pasa tal cual al motor, que es lo que permite probar el envoltorio en 9 segundos
+(`ops/corrida_diaria.sh --dry-run --skus 10012716`) en vez de esperar 1,6 h.
+
+Cuatro decisiones están codificadas en las unidades y cada una responde a algo medido, no a una preferencia:
+
+- **`Persistent=true`.** Si a las 02:00 la máquina estaba apagada o suspendida, la corrida arranca apenas
+  prende. El `run_id` lleva entonces la hora real de arranque, no las 02:00 — un día tardío sigue siendo un día
+  en la serie, y un `run_id` que mintiera sobre cuándo se midió sería peor.
+- **`TimeoutStartSec=16h`.** Arriba de la peor corrida observada y debajo de las 24. `run_20260829_020141` tardó
+  **12,6 h y terminó bien**, con 3.246 filas: un tope "razonable" de 3 o 6 h habría tirado un día bueno. El
+  tope existe solo para que una corrida *colgada* no se coma días enteros en silencio.
+- **Un solo reintento** (`Restart=on-failure`, `RestartSec=30min`, `StartLimitBurst=2`), y
+  `RestartPreventExitStatus=2 130`: esperar media hora arregla una caída de red, no arregla un `--categoria`
+  mal tipeado ni un Ctrl-C.
+- **`flock` no bloqueante** en el envoltorio. Si la corrida de ayer sigue viva, la de hoy se retira sin medir en
+  vez de correr dos veces en paralelo contra el mismo storefront.
+
+Dos trampas que ya costaron su verificación y que cualquiera que edite esto va a volver a encontrar:
+`retail_engine` está instalado **editable solo en `/home/jota/anaconda3/bin/python`** (`/usr/bin/python3` no lo
+importa), y el `--canal chrome` por defecto busca `google-chrome` en el `PATH`, que una unidad de systemd no
+hereda de tu shell. Por eso el envoltorio fija las dos cosas explícitamente. Si algún día la corrida diaria
+falla con `ModuleNotFoundError` o "no se encontró el navegador", empezá por ahí.
+
+`alerta_fallo.sh` **se puede correr a mano sin generar un falso positivo**: consulta el estado real del
+servicio y, si no está en `failed`, se anuncia como prueba y no escribe en `fallas.log`. La primera versión no
+hacía eso y gritaba "la corrida falló" con `result=success exit=0` en el cuerpo del mismo mensaje. Un avisador
+que puede mentir en la dirección de la alarma envenena todas las alarmas siguientes — es el único lugar de este
+repo donde un falso positivo cuesta más que un falso negativo.
+
+Las unidades viven **versionadas en `ops/systemd/`** y están enlazadas (`systemctl --user link`) a
+`~/.config/systemd/user/`, no copiadas: el repo es la fuente. Editarlas requiere `systemctl --user
+daemon-reload`. Depende de `Linger=yes` en el usuario (`loginctl show-user jota`), que es lo que deja correr un
+timer de usuario sin sesión iniciada — si alguien lo apaga, la corrida de las 2am deja de existir en silencio.
+
+**El registro a 19 días (medido el 2026-09-24 sobre `runs.jsonl` y los logs del envoltorio).** Del 2026-09-06 al
+2026-09-24 hay **19 corridas en 19 días distintos: cero huecos**, las 19 con `corrida_completa=true` y código de
+salida 0, `fallas.log` vacío, y el `flock` nunca rechazó una corrida. Eso es lo que la automatización prometía y
+es la primera vez que la serie lo tiene. Dos cosas de ese registro valen más que el "19/19":
+
+- **La corrida lenta volvió, y volvió bien.** Mediana de 1,58 h, pero el 2026-09-11 tardó **10,44 h y terminó
+  completa**, con 3.118 filas. Es el segundo caso después de las 12,6 h del 2026-08-29, así que una corrida de
+  diez horas y pico ya no es una anécdota: un `TimeoutStartSec` de 3 o 6 h habría matado dos días buenos de esta
+  serie. No lo bajes contra la mediana.
+- **Cero fallas no verifica el avisador.** Nada disparó `OnFailure` en 19 días, así que `alerta_fallo.sh` lleva
+  todo ese tiempo probado solo a mano. Ésa es exactamente la razón por la que se lo dejó seguro de correr suelto
+  — leé el párrafo de arriba antes de probarlo, porque la prueba se ve idéntica a la alarma real en la pantalla.
 
 **La suite de regresión es el primer paso para verificar cualquier cambio.** 64 funciones `test_` repartidas en
 seis archivos bajo `tests/makro_plazavea/`, ninguna de las cuales toca la red:
@@ -688,8 +767,9 @@ lógica de comparación entre sucursales a este motor, ni a 2 sucursales ni a 20
   deliberadamente **no** se borró (revisar a los 30 días, o cuando el alcance salga de abarrotes), y los
   umbrales 6, 10, 12, 13 y 15 no tienen auditoría bajo la fórmula mayorista posterior a v18.
 - `CLAUDE.md` está **trackeado por git**: cada edición entra al historial y al diff de un PR. Tratalo como
-  fuente, no como scratch. `.gitignore` cubre `.env`, `data/`, `graphify-out/`, `.vscode/` y artefactos de
-  build.
+  fuente, no como scratch. `.gitignore` cubre `.env`, `data/`, `logs/`, `graphify-out/`, `.vscode/`, los
+  artefactos de build, y las dos salidas de la captura logística (`ops/.mk_capture_profile/`,
+  `ops/captura_mk_shipping.json`) — la segunda por los identificadores de sesión que lleva en el cuerpo.
 - `graphify-out/` (gitignored) puede contener un grafo de conocimiento generado de este repo — útil para
   orientarse cuando está, pero el archivo del motor es siempre la fuente de verdad. Hoy no está en el árbol.
 - **`test_propiedades_corrida.py` se archivó el 2026-08-30, no se reparó.** Estaba clavado a

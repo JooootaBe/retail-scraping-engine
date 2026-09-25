@@ -1,0 +1,6 @@
+[Unit]
+Description=Avisa que la corrida diaria del motor makro_plazavea fallo
+
+[Service]
+Type=oneshot
+ExecStart=/home/jota/retail_scraping_engine/ops/alerta_fallo.sh

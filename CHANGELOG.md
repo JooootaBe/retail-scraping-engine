@@ -10,6 +10,54 @@ y el versionado sigue [Semantic Versioning](https://semver.org/lang/es/).
 Siete versiones del motor desde 1.2.0 — v18 a v24 — y tres de ellas mueven `SCHEMA_VERSION`
 (4 → 5 → 6 → 7). Nada de esto está publicado todavía.
 
+### Added
+- **La corrida diaria se ejecuta sola a las 02:00** (`ops/corrida_diaria.sh`, `ops/alerta_fallo.sh`,
+  `ops/systemd/`). El motor no cambió: nada de esto toca `makro_plazavea.py`, ni sube `VERSION`, ni
+  sube `SCHEMA_VERSION`. Un timer de usuario de systemd (`OnCalendar=*-*-* 02:00:00`, hora local de
+  `America/Lima`) dispara un envoltorio que invoca el CLI con el alcance diario
+  (`--categoria "/431/" --auditoria-mayorista 10`).
+
+  Hasta ahora el scheduler era una persona, y la serie ya llevaba las dos cicatrices que eso
+  produce: **el 2026-08-28 no tiene corrida** —un día perdido, sin más registro que el hueco entre
+  dos carpetas— y las diez corridas previas arrancan repartidas entre las 02:00:00 y las 02:14:49.
+
+  Cuatro decisiones salieron de medir las corridas que ya estaban en disco, no de preferencias:
+  - `Persistent=true` — si a las 02:00 la máquina estaba apagada, la corrida arranca al prender. El
+    `run_id` lleva entonces la hora real de arranque; un día tardío sigue siendo un día en la serie.
+  - `TimeoutStartSec=16h` — `run_20260829_020141` tardó **12,6 h contra las ~1,6 h habituales y
+    terminó bien**, con 3.246 filas. Un tope "razonable" de 3 o 6 h habría matado un día bueno, así
+    que el tope se puso arriba de la peor corrida observada y debajo de las 24 h: existe solo para
+    que una corrida colgada no se coma días enteros en silencio.
+  - Un solo reintento a los 30 min, con `RestartPreventExitStatus=2 130` — media hora rescata una
+    caída de red, no arregla un argumento mal tipeado ni un Ctrl-C.
+  - `flock` no bloqueante — la misma corrida de 12,6 h es la que demuestra que una puede pisar la
+    ventana de la siguiente. La segunda se retira sin medir en vez de correr en paralelo.
+
+  El envoltorio fija por ruta absoluta el intérprete (`retail_engine` está instalado editable solo
+  en el Python de anaconda) y un `PATH` que incluya `/usr/bin` (el `--canal chrome` por defecto
+  busca `google-chrome` ahí). Una unidad de systemd no hereda ninguna de las dos cosas de la shell,
+  y ése es el modo de falla clásico de automatizar esto.
+
+  Verificado antes de confiar en el timer: el envoltorio a mano (propaga 0, propaga 2 ante argumento
+  inválido, y el `flock` rechaza la segunda corrida), después bajo el gestor de systemd —que es
+  donde de verdad se rompe el entorno— y recién ahí el timer encendido.
+
+  **Registro a 19 días** (medido el 2026-09-24 sobre `runs.jsonl` y los logs del envoltorio): del
+  2026-09-06 al 2026-09-24, **19 corridas en 19 días distintos, cero huecos**, las 19 completas y
+  con salida 0, `fallas.log` vacío y ningún rechazo del `flock`. La mediana quedó en 1,58 h, pero el
+  2026-09-11 tardó **10,44 h y terminó completa** con 3.118 filas — el segundo caso de corrida lenta
+  que termina bien, y la confirmación de que las 16 h de `TimeoutStartSec` no son holgura de más.
+  Lo que ese registro *no* verifica: nada disparó `OnFailure` en 19 días, así que `alerta_fallo.sh`
+  sigue probado solo a mano.
+
+### Changed
+- **`ops/` reconoce ahora dos clases de herramienta** (`CLAUDE.md`). Su definición decía que lo que
+  vive ahí *"responde una pregunta sobre el catálogo o una sucursal en vez de extraer precios"*, y
+  un envoltorio de scheduling no responde ninguna pregunta: decide *cuándo* corre el motor. En vez
+  de dejar la frase colgada, se amplió a herramientas de pregunta e infraestructura de ejecución,
+  conservando la regla que de verdad protege la frontera: si un archivo de `ops/` parsea una
+  respuesta de VTEX o escribe una fila, está en la carpeta equivocada.
+
 ### Fixed
 - **El descuento del bi-precio se elegía por posición en el array de teasers** (v24,
   `SCHEMA_VERSION` 6 → 7, cabecera idéntica). `leer_descuento` recorría la respuesta entera y

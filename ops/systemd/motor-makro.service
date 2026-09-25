@@ -1,0 +1,37 @@
+[Unit]
+Description=Motor makro_plazavea — corrida diaria de precios por sucursal
+Documentation=file:///home/jota/retail_scraping_engine/CLAUDE.md
+After=network-online.target
+Wants=network-online.target
+
+# Exactamente un reintento: dos arranques permitidos en una ventana de 2 h.
+# Al tercero la unidad entra en "failed" y recien ahi dispara OnFailure.
+StartLimitIntervalSec=7200
+StartLimitBurst=2
+
+OnFailure=motor-makro-alerta.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jota/retail_scraping_engine
+ExecStart=/home/jota/retail_scraping_engine/ops/corrida_diaria.sh
+
+# Tope de duracion. Para Type=oneshot el knob es TimeoutStartSec, NO
+# RuntimeMaxSec: systemd ignora ese ultimo en oneshot ("has no effect in
+# combination with Type=oneshot") y la guarda quedaria de adorno.
+#
+# 16 h esta arriba de la peor corrida observada (12,6 h el 2026-08-29, que
+# TERMINO BIEN con 3.246 filas) y debajo de las 24 h, asi una corrida colgada
+# no se come dias enteros en silencio. No lo bajes a "lo normal": mataria
+# corridas buenas, y una corrida lenta igual entrega la serie del dia.
+TimeoutStartSec=16h
+
+Restart=on-failure
+RestartSec=30min
+
+# Esperar no arregla un argumento mal tipeado (2) ni un Ctrl-C (130).
+RestartPreventExitStatus=2 130
+
+# Sin [Install] a proposito: esta unidad la dispara motor-makro.timer y nada
+# mas. Un WantedBy= aca invitaria a habilitarla suelta, y entonces una corrida
+# de 1,6 h arrancaria en cada arranque de sesion.

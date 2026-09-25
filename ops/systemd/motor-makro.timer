@@ -1,0 +1,18 @@
+[Unit]
+Description=Dispara la corrida diaria del motor makro_plazavea a las 02:00
+
+[Timer]
+Unit=motor-makro.service
+
+# systemd interpreta OnCalendar en hora local; la maquina esta en
+# America/Lima, asi que esto son las 2am de Lima sin conversion de por medio.
+OnCalendar=*-*-* 02:00:00
+
+# Si a las 02:00 la maquina estaba apagada o suspendida, la corrida arranca
+# apenas prende. Es lo que evita repetir el 2026-08-28, que no tiene corrida.
+Persistent=true
+
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -32,6 +32,18 @@ Eso descubre hasta 300 SKUs, limita cada subcategoría a 3, y mide 100 de ellos 
 
 La salida cae en `data/makro_plazavea/run_<YYYYMMDD_HHMMSS>/` — una carpeta inmutable por ejecución, que contiene `filas.csv`, `run.json` y `raw.jsonl.gz`. Leer toda la historia es un glob sobre `run_*/filas.csv`. El código de salida del proceso es significativo: 0 completa, 1 la ejecución entregó menos de lo que prometía su selección, 2 argumentos inválidos o Playwright ausente, 130 Ctrl-C.
 
+### La ejecución diaria es automática
+
+Desde el 2026-09-06 la serie no depende de que alguien se acuerde: un timer de usuario de systemd dispara `ops/corrida_diaria.sh` todos los días a las 02:00 hora de Lima. Medido el 2026-09-24, lleva **19 días consecutivos sin un hueco**, todos completos y con código de salida 0.
+
+```bash
+ops/corrida_diaria.sh                            # la misma ejecución, a mano, ahora
+systemctl --user list-timers motor-makro.timer   # cuándo dispara la próxima
+journalctl --user -u motor-makro -n 100          # su consola
+```
+
+El alcance diario vive en una sola constante (`ALCANCE_DIARIO`) dentro del envoltorio, y cambiarlo cambia qué universo mide la serie de ahí en adelante. Las unidades están versionadas en `ops/systemd/` y enlazadas a `~/.config/systemd/user/`, así que el repositorio es la fuente. `CLAUDE.md` explica por qué cada valor de las unidades es el que es — ninguno es una preferencia.
+
 ## Pruebas
 
 64 funciones `test_` repartidas en seis archivos bajo `tests/makro_plazavea/`, ninguna de las cuales toca la red. Pytest no es una dependencia declarada; cada archivo también corre de forma independiente y sale con 0/1:
@@ -48,6 +60,7 @@ Cada archivo resuelve la raíz del repositorio como `parents[2]` desde su propia
 ```
 src/retail_engine/collectors/makro_plazavea.py   el motor
 ops/                                             herramientas operativas; nunca miden precios
+ops/corrida_diaria.sh, ops/systemd/              la ejecución diaria automática de las 02:00
 docs/columnas.md                                 vivo: el diccionario de las 79 columnas
 docs/historia/                                   archivado: el registro cerrado de la era 1.1.0
 docs/bodegueros/                                 el nuevo rumbo (Los Bodegueros)
